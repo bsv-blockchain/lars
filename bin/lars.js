@@ -104,6 +104,10 @@ program
             const packageJsonContent = generatePackageJson(backendDependencies);
             fs.writeFileSync(path.join(overlayDevContainerPath, 'package.json'), JSON.stringify(packageJsonContent, null, 2));
 
+            // Generate tsconfig.json
+            const tsconfigContent = generateTsConfig();
+            fs.writeFileSync(path.join(overlayDevContainerPath, 'tsconfig.json'), tsconfigContent);
+
             // Generate Dockerfile
             const dockerfileContent = generateDockerfile();
             fs.writeFileSync(path.join(overlayDevContainerPath, 'Dockerfile'), dockerfileContent);
@@ -157,7 +161,6 @@ program.parse(process.argv);
 // Helper functions
 function generateDockerCompose(hostingUrl, localDataPath, serverPrivateKey) {
     const composeContent = {
-        version: '3.9',
         services: {
             'overlay-dev-container': {
                 build: {
@@ -244,6 +247,7 @@ const main = async () => {
     )
 
     server.configurePort(8080)
+    server.configureVerboseRequestLogging(true)
     await server.configureKnex(process.env.KNEX_URL!)
     await server.configureMongo(process.env.MONGO_URL!)
     server.configureEnableGASPSync(false)
@@ -261,7 +265,7 @@ const main = async () => {
     for (const [name, lsConfig] of Object.entries(deploymentInfo.lookupServices || {})) {
         const importName = `lsf_${name}`;
         const pathToLsInContainer = path.join('/app', path.relative(process.cwd(), lsConfig.serviceFactory)).replace(/\\/g, '/');
-        imports += `import { serviceFactory as ${importName} } from '${pathToLsInContainer}'\n`;
+        imports += `import ${importName} from '${pathToLsInContainer}'\n`;
         if (lsConfig.hydrateWith === 'mongo') {
             mainFunction += `    server.configureLookupServiceWithMongo('${name}', ${importName})\n`;
         } else if (lsConfig.hydrateWith === 'knex') {
@@ -276,8 +280,7 @@ const main = async () => {
     await server.start()
 }
 
-main()
-`;
+main()`;
 
     const indexTsContent = imports + mainFunction;
     return indexTsContent;
@@ -296,11 +299,11 @@ function generatePackageJson(backendDependencies) {
         "author": "",
         "license": "ISC",
         "dependencies": {
-            "@bsv/overlay-express": "^0.1.6",
+            ...backendDependencies,
+            "@bsv/overlay-express": "^0.1.7",
             "dotenv": "^16.4.5",
             "mysql2": "^3.11.5",
-            "tsx": "^4.19.2",
-            ...backendDependencies
+            "tsx": "^4.19.2"
         },
         "devDependencies": {
             "@types/node": "^22.10.1"
@@ -310,23 +313,24 @@ function generatePackageJson(backendDependencies) {
 }
 
 function generateDockerfile() {
-    return `
-# Use an official Node.js runtime as the base image
+    return `# Use an official Node.js runtime as the base image
 FROM node:22-alpine
 
 # Set working directory inside the container
 WORKDIR /app
 
-# Copy package.json and package-lock.json
-COPY package*.json ./
-
-# Install dependencies
-RUN npm install
-
 # Expose the application port
 EXPOSE 8080
 
 # Start the application
-CMD ["sh", "-c", "cd /app/backend && npm install && cd /app && npm start"]
-`;
+CMD ["sh", "-c", "cd /app/backend && npm i && cd /app && npm i && npm run start"]`;
+}
+
+function generateTsConfig() {
+    return `{
+    "compilerOptions": {
+        "experimentalDecorators": true,
+        "emitDecoratorMetadata": true
+    }
+}`;
 }
