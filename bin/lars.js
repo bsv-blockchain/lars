@@ -4,49 +4,60 @@ const { program } = require('commander');
 const path = require('path');
 const fs = require('fs-extra');
 const ngrok = require('ngrok');
-const { spawn } = require('child_process');
+const { spawn, execSync } = require('child_process');
 const chokidar = require('chokidar');
 const yaml = require('yaml');
 const os = require('os');
-const { execSync } = require('child_process');
 const crypto = require('crypto');
 const { Ninja } = require('ninja-base');
 const { getPublicKey, createAction } = require('@babbage/sdk-ts');
-const { P2PKH, PrivateKey, PublicKey } = require('@bsv/sdk')
+const { P2PKH, PrivateKey, PublicKey } = require('@bsv/sdk');
+const figlet = require('figlet');
 
 program
     .command('start')
     .description('Start LARS development environment')
     .action(async () => {
+        const { default: chalk } = await import('chalk');
+        const { default: inquirer } = await import('inquirer');
         try {
+            console.log(
+                chalk.yellow(
+                    figlet.textSync('LARS', { horizontalLayout: 'full' })
+                )
+            );
+            console.log(chalk.green('Welcome to the LARS development environment! 🚀'));
+            console.log(chalk.green("Let's get your local Overlay Services up and running!\n"));
+
             // Step 1: Parse and validate deployment-info.json
             const deploymentInfoPath = path.resolve(process.cwd(), 'deployment-info.json');
             if (!fs.existsSync(deploymentInfoPath)) {
-                console.error('deployment-info.json not found in the current directory.');
+                console.error(chalk.red('❌ deployment-info.json not found in the current directory.'));
                 process.exit(1);
             }
             const deploymentInfo = JSON.parse(fs.readFileSync(deploymentInfoPath, 'utf-8'));
 
             // Step 2: Check for system dependencies
+            console.log(chalk.blue('🔍 Checking system dependencies...'));
             // Check Docker
             try {
                 execSync('docker --version', { stdio: 'ignore' });
             } catch (err) {
-                console.error('Docker is not installed or not running.');
+                console.error(chalk.red('❌ Docker is not installed or not running.'));
                 process.exit(1);
             }
             // Check Docker Compose
             try {
                 execSync('docker compose version', { stdio: 'ignore' });
             } catch (err) {
-                console.error('Docker Compose plugin is not installed.');
+                console.error(chalk.red('❌ Docker Compose plugin is not installed.'));
                 process.exit(1);
             }
             // Check ngrok
             try {
                 execSync('ngrok version', { stdio: 'ignore' });
             } catch (err) {
-                console.error('ngrok is not installed.');
+                console.error(chalk.red('❌ ngrok is not installed.'));
                 process.exit(1);
             }
 
@@ -55,59 +66,131 @@ program
             try {
                 fs.ensureDirSync(localDataPath);
             } catch (err) {
-                console.error('Cannot write to ./local-data directory.');
+                console.error(chalk.red('❌ Cannot write to ./local-data directory.'));
                 process.exit(1);
             }
 
             // Step 3: Start ngrok and get public URL
-            console.log('Starting ngrok...');
+            console.log(chalk.blue('🌐 Starting ngrok...'));
             const ngrokUrl = await ngrok.connect({ addr: 8080 });
-            console.log(`ngrok tunnel established at ${ngrokUrl}`);
+            console.log(chalk.green(`🚀 ngrok tunnel established at ${ngrokUrl}`));
 
             // Save HOSTING_URL for later use
             const hostingUrl = ngrokUrl;
 
             // Generate a server private key
-            /*
-            TODO:
-            - Check if a private key is configured in a local-data/server-private-key.txt file
-            - If not offer to generate one or have the developer enter one
-            - If one is entered use a password entry so as not to display it.
-            - Either way once we have a key check its balance using Ninja
-            - If balance less than 10000 warn, show current balance and ask whether to fund, print manual instructions or continue
-            - If yes use local MNC to fund
-            - If print manual instructions provide KeyFunder instructions and the private key
-            */
-            let serverPrivateKey
-            try {
-                serverPrivateKey = fs.readFileSync(path.resolve(localDataPath, 'server-private-key.txt'), 'utf-8')
-                // TODO: Validate 64-character loercase hex string
-            } catch (e) {
-                console.error('Server private key does not exist, generating a new one', e)
-                serverPrivateKey = crypto.randomBytes(32).toString('hex')
-                fs.writeFileSync(path.resolve(localDataPath, 'server-private-key.txt'), serverPrivateKey)
-                console.log('Key saved')
+            let serverPrivateKeyPath = path.resolve(localDataPath, 'server-private-key.txt');
+            let serverPrivateKey;
+
+            if (fs.existsSync(serverPrivateKeyPath)) {
+                serverPrivateKey = fs.readFileSync(serverPrivateKeyPath, 'utf-8').trim();
+                // Validate 64-character lowercase hex string
+                if (!/^[0-9a-f]{64}$/.test(serverPrivateKey)) {
+                    console.error(chalk.red('❌ Invalid private key format in server-private-key.txt'));
+                    process.exit(1);
+                }
+            } else {
+                console.log(chalk.yellow('⚠️  No server private key found.'));
+                const { action } = await inquirer.prompt([
+                    {
+                        type: 'list',
+                        name: 'action',
+                        message: 'Do you want to generate a new private key or enter an existing one?',
+                        choices: ['🔑 Generate new key', '✏️ Enter existing key'],
+                    },
+                ]);
+
+                if (action === '🔑 Generate new key') {
+                    serverPrivateKey = crypto.randomBytes(32).toString('hex');
+                    fs.writeFileSync(serverPrivateKeyPath, serverPrivateKey);
+                    console.log(chalk.green('✨ New private key generated and saved to server-private-key.txt'));
+                } else {
+                    const { enteredKey } = await inquirer.prompt([
+                        {
+                            type: 'password',
+                            name: 'enteredKey',
+                            message: 'Enter your private key (hex format):',
+                            mask: '*',
+                            validate: function (value) {
+                                if (/^[0-9a-fA-F]{64}$/.test(value)) {
+                                    return true;
+                                }
+                                return 'Please enter a valid 64-character hexadecimal string.';
+                            },
+                        },
+                    ]);
+
+                    serverPrivateKey = enteredKey.toLowerCase();
+                    fs.writeFileSync(serverPrivateKeyPath, serverPrivateKey);
+                    console.log(chalk.green('🔐 Private key saved to server-private-key.txt'));
+                }
             }
+
+            // Check balance and fund if necessary
             const ninja = new Ninja({
                 privateKey: serverPrivateKey
-            })
-            const { total: balance } = await ninja.getTotalValue()
+            });
+            const { total: balance } = await ninja.getTotalValue();
             if (balance < 10000) {
-                console.warn('balance is low', balance)
-                const amountToFund = 30000 // TODO get from user
-                await fundNinja(ninja, amountToFund, serverPrivateKey)
+                console.log(chalk.red(`⚠️  Your server's balance is low: ${balance} satoshis.`));
+                const { action } = await inquirer.prompt([
+                    {
+                        type: 'list',
+                        name: 'action',
+                        message: 'Your server\'s balance is low. What would you like to do?',
+                        choices: [
+                            '💰 Fund server automatically (using local MetaNet Client)',
+                            '📝 Print manual funding instructions',
+                            '🚀 Continue without funding',
+                        ],
+                    },
+                ]);
+
+                if (action === '💰 Fund server automatically (using local MetaNet Client)') {
+                    const { amountToFund } = await inquirer.prompt([
+                        {
+                            type: 'input',
+                            name: 'amountToFund',
+                            message: 'Enter the amount to fund (in satoshis):',
+                            default: '30000',
+                            validate: function (value) {
+                                const valid = !isNaN(parseInt(value)) && parseInt(value) > 0;
+                                return valid || 'Please enter a positive number.';
+                            },
+                            filter: Number,
+                        },
+                    ]);
+                    await fundNinja(ninja, amountToFund, serverPrivateKey);
+                    console.log(chalk.green(`🎉 Server funded with ${amountToFund} satoshis.`));
+                } else if (action === '📝 Print manual funding instructions') {
+                    console.log(chalk.blue('\nManual Funding Instructions:'));
+                    console.log('1. Use KeyFunder to fund your server.');
+                    console.log(`2. Your server's Ninja private key is: ${serverPrivateKey}`);
+                    console.log('3. Visit https://keyfunder.babbage.systems and follow the instructions.');
+                    await inquirer.prompt([ // TODO: Use the correct "wait" prompt.
+                        {
+                            type: 'input',
+                            name: 'amountToFund',
+                            message: 'Press enter when you\'re ready to continue.',
+                        },
+                    ]);
+                } else {
+                    console.log(chalk.yellow('🚀 Continuing without funding.'));
+                }
             } else {
-                console.log(`Server balance is ${balance}`)
+                console.log(chalk.green(`✅ Server balance is sufficient: ${balance} satoshis.`));
             }
 
             // Step 4: Generate docker-compose.yml
+            console.log(chalk.blue('\n📝 Generating docker-compose.yml...'));
             const composeContent = generateDockerCompose(hostingUrl, localDataPath, serverPrivateKey);
             const composeYaml = yaml.stringify(composeContent);
             const composeFilePath = path.join(localDataPath, 'docker-compose.yml');
             fs.writeFileSync(composeFilePath, composeYaml);
-            console.log('docker-compose.yml generated.');
+            console.log(chalk.green('✅ docker-compose.yml generated.'));
 
             // Step 5: Generate index.ts, package.json, Dockerfile
+            console.log(chalk.blue('\n📁 Generating overlay-dev-container files...'));
             const overlayDevContainerPath = path.join(localDataPath, 'overlay-dev-container');
             fs.ensureDirSync(overlayDevContainerPath);
 
@@ -122,7 +205,7 @@ program
                 const backendPackageJson = JSON.parse(fs.readFileSync(backendPackageJsonPath, 'utf-8'));
                 backendDependencies = backendPackageJson.dependencies || {};
             } else {
-                console.warn('No backend/package.json found.');
+                console.warn(chalk.yellow('⚠️  No backend/package.json found.'));
             }
             const packageJsonContent = generatePackageJson(backendDependencies);
             fs.writeFileSync(path.join(overlayDevContainerPath, 'package.json'), JSON.stringify(packageJsonContent, null, 2));
@@ -138,30 +221,37 @@ program
             const dockerfileContent = generateDockerfile();
             fs.writeFileSync(path.join(overlayDevContainerPath, 'Dockerfile'), dockerfileContent);
 
-            console.log('overlay-dev-container files generated.');
+            console.log(chalk.green('✅ overlay-dev-container files generated.'));
 
             // Step 6: Start Docker Compose
-            console.log('Starting Docker Compose...');
+            console.log(chalk.blue('\n🐳 Starting Docker Compose...'));
             const dockerComposeUp = spawn('docker', ['compose', 'up', '--build'], {
                 cwd: localDataPath,
                 stdio: 'inherit'
             });
 
             dockerComposeUp.on('exit', (code) => {
-                console.log(`Docker Compose exited with code ${code}`);
+                if (code === 0) {
+                    console.log(chalk.green(`🐳 Docker Compose is going down.`));
+                } else {
+                    console.log(chalk.red(`❌ Docker Compose exited with code ${code}`));
+                }
+                console.log(chalk.blue(`👋 LARS will see you next time!`));
+                process.exit(0);
             });
 
             // Step 7: Set up file watchers
+            console.log(chalk.blue('\n👀 Setting up file watchers...'));
             const backendSrcPath = path.resolve(process.cwd(), 'backend', 'src');
 
             const watcher = chokidar.watch(backendSrcPath, { ignoreInitial: true });
 
             watcher.on('all', (event, filePath) => {
-                console.log(`File ${event}: ${filePath}`);
+                console.log(chalk.yellow(`🔄 File ${event}: ${filePath}`));
 
                 if (filePath.startsWith(path.join(backendSrcPath, 'contracts'))) {
                     // Run npm run compile in backend
-                    console.log('Changes detected in contracts directory. Running npm run compile...');
+                    console.log(chalk.blue('🔨 Changes detected in contracts directory. Running npm run compile...'));
                     const compileProcess = spawn('npm', ['run', 'compile'], {
                         cwd: path.resolve(process.cwd(), 'backend'),
                         stdio: 'inherit'
@@ -169,16 +259,19 @@ program
 
                     compileProcess.on('exit', (code) => {
                         if (code === 0) {
-                            console.log('Contract compilation completed.');
+                            console.log(chalk.green('✅ Contract compilation completed.'));
                         } else {
-                            console.error(`Contract compilation failed with exit code ${code}.`);
+                            console.error(chalk.red(`❌ Contract compilation failed with exit code ${code}.`));
                         }
                     });
                 }
             });
 
+            console.log(chalk.green('\n🎉 LARS development environment is up and running! Happy coding!'));
+
         } catch (err) {
-            console.error('Error starting LARS:', err);
+            console.error(chalk.red('❌ Error starting LARS:', err));
+            process.exit(0);
         }
     });
 
@@ -255,12 +348,11 @@ function generateIndexTs(deploymentInfo) {
     let imports = `
 import OverlayExpress from '@bsv/overlay-express'
 `;
-
     let mainFunction = `
 const main = async () => {
 
     const server = new OverlayExpress(
-        \`testnode\`,
+        \`LARS\`,
         process.env.SERVER_PRIVATE_KEY!,
         process.env.HOSTING_URL!
     )
@@ -415,7 +507,6 @@ const fundNinja = async (ninja, amount, ninjaPriv) => {
         protocol: '3241645161d8',
         note: 'Incoming payment from KeyFunder'
     }
-    console.log('tx', JSON.stringify(directTransaction, null, 2))
     await ninja.submitDirectTransaction(directTransaction)
     console.log('ninja funded!')
 }
