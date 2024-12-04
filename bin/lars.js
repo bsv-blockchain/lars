@@ -233,8 +233,6 @@ function generateDockerCompose(hostingUrl, localDataPath, serverPrivateKey) {
 function generateIndexTs(deploymentInfo) {
     let imports = `
 import OverlayExpress from '@bsv/overlay-express'
-import dotenv from 'dotenv'
-dotenv.config()
 `;
 
     let mainFunction = `
@@ -301,7 +299,6 @@ function generatePackageJson(backendDependencies) {
         "dependencies": {
             ...backendDependencies,
             "@bsv/overlay-express": "^0.1.7",
-            "dotenv": "^16.4.5",
             "mysql2": "^3.11.5",
             "tsx": "^4.19.2"
         },
