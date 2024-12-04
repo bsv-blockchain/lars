@@ -176,7 +176,8 @@ function generateDockerCompose(hostingUrl, localDataPath, serverPrivateKey) {
                     MONGO_URL: 'mongodb://mongo:27017/overlay-db',
                     KNEX_URL: 'mysql://overlayAdmin:overlay123@mysql:3306/overlay',
                     SERVER_PRIVATE_KEY: serverPrivateKey,
-                    HOSTING_URL: hostingUrl
+                    HOSTING_URL: hostingUrl,
+                    NO_UPDATE_NOTIFIER: '1'
                 },
                 depends_on: [
                     'mysql',
@@ -184,7 +185,9 @@ function generateDockerCompose(hostingUrl, localDataPath, serverPrivateKey) {
                 ],
                 volumes: [
                     `${path.resolve(localDataPath, 'overlay-dev-container')}:/app`,
-                    `${path.resolve(process.cwd(), 'backend')}:/app/backend`
+                    `/app/node_modules`,
+                    `${path.resolve(process.cwd(), 'backend')}:/app/backend`,
+                    `/app/backend/node_modules`
                 ]
             },
             mysql: {
@@ -220,7 +223,7 @@ function generateDockerCompose(hostingUrl, localDataPath, serverPrivateKey) {
                 ],
                 healthcheck: {
                     test: ['CMD', 'mongo', '--eval', "db.adminCommand('ping')"],
-                    interval: '10s',
+                    interval: '60s',
                     timeout: '5s',
                     retries: 5
                 }
@@ -320,7 +323,7 @@ WORKDIR /app
 EXPOSE 8080
 
 # Start the application
-CMD ["sh", "-c", "cd /app/backend && npm i && cd /app && npm i && npm run start"]`;
+CMD ["sh", "-c", "cd /app/backend && npm i --no-update-check --no-progress && cd /app && npm i --no-update-check --no-progress && npm run start"]`;
 }
 
 function generateTsConfig() {
