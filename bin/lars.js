@@ -10,6 +10,9 @@ const yaml = require('yaml');
 const os = require('os');
 const { execSync } = require('child_process');
 const crypto = require('crypto');
+const { Ninja } = require('ninja-base');
+const { getPublicKey, createAction } = require('@babbage/sdk-ts');
+const { P2PKH, PrivateKey, PublicKey } = require('@bsv/sdk')
 
 program
     .command('start')
@@ -71,11 +74,31 @@ program
             - If not offer to generate one or have the developer enter one
             - If one is entered use a password entry so as not to display it.
             - Either way once we have a key check its balance using Ninja
-            - If balance less than 10000 warn and ask whether to fund, print manual instructions or continue
+            - If balance less than 10000 warn, show current balance and ask whether to fund, print manual instructions or continue
             - If yes use local MNC to fund
             - If print manual instructions provide KeyFunder instructions and the private key
             */
-            const serverPrivateKey = crypto.randomBytes(32).toString('hex');
+            let serverPrivateKey
+            try {
+                serverPrivateKey = fs.readFileSync(path.resolve(localDataPath, 'server-private-key.txt'), 'utf-8')
+                // TODO: Validate 64-character loercase hex string
+            } catch (e) {
+                console.error('Server private key does not exist, generating a new one', e)
+                serverPrivateKey = crypto.randomBytes(32).toString('hex')
+                fs.writeFileSync(path.resolve(localDataPath, 'server-private-key.txt'), serverPrivateKey)
+                console.log('Key saved')
+            }
+            const ninja = new Ninja({
+                privateKey: serverPrivateKey
+            })
+            const { total: balance } = await ninja.getTotalValue()
+            if (balance < 10000) {
+                console.warn('balance is low', balance)
+                const amountToFund = 30000 // TODO get from user
+                await fundNinja(ninja, amountToFund, serverPrivateKey)
+            } else {
+                console.log(`Server balance is ${balance}`)
+            }
 
             // Step 4: Generate docker-compose.yml
             const composeContent = generateDockerCompose(hostingUrl, localDataPath, serverPrivateKey);
@@ -107,6 +130,9 @@ program
             // Generate tsconfig.json
             const tsconfigContent = generateTsConfig();
             fs.writeFileSync(path.join(overlayDevContainerPath, 'tsconfig.json'), tsconfigContent);
+
+            // Generate wait script
+            fs.writeFileSync(path.join(overlayDevContainerPath, 'wait-for-services.sh'), generateWaitScript());
 
             // Generate Dockerfile
             const dockerfileContent = generateDockerfile();
@@ -164,8 +190,8 @@ function generateDockerCompose(hostingUrl, localDataPath, serverPrivateKey) {
         services: {
             'overlay-dev-container': {
                 build: {
-                    context: './overlay-dev-container',
-                    dockerfile: 'Dockerfile'
+                    context: '..',
+                    dockerfile: './local-data/overlay-dev-container/Dockerfile'
                 },
                 container_name: 'overlay-dev-container',
                 restart: 'always',
@@ -184,10 +210,8 @@ function generateDockerCompose(hostingUrl, localDataPath, serverPrivateKey) {
                     'mongo'
                 ],
                 volumes: [
-                    `${path.resolve(localDataPath, 'overlay-dev-container')}:/app`,
-                    `/app/node_modules`,
-                    `${path.resolve(process.cwd(), 'backend')}:/app/backend`,
-                    `/app/backend/node_modules`
+                    `${path.resolve(process.cwd(), 'src')}:/app/backend/src`,
+                    `${path.resolve(process.cwd(), 'artifacts')}:/app/backend/artifacts`
                 ]
             },
             mysql: {
@@ -213,20 +237,14 @@ function generateDockerCompose(hostingUrl, localDataPath, serverPrivateKey) {
                 }
             },
             mongo: {
-                image: 'mongo:5.0',
+                image: 'mongo:6.0',
                 container_name: 'overlay-mongo',
                 ports: [
                     '27017:27017'
                 ],
                 volumes: [
                     `${path.resolve(localDataPath, 'mongo')}:/data/db`
-                ],
-                healthcheck: {
-                    test: ['CMD', 'mongo', '--eval', "db.adminCommand('ping')"],
-                    interval: '60s',
-                    timeout: '5s',
-                    retries: 5
-                }
+                ]
             }
         }
     };
@@ -257,7 +275,7 @@ const main = async () => {
     // For each topic manager
     for (const [name, pathToTm] of Object.entries(deploymentInfo.topicManagers || {})) {
         const importName = `tm_${name}`;
-        const pathToTmInContainer = path.join('/app', path.relative(process.cwd(), pathToTm)).replace(/\\/g, '/');
+        const pathToTmInContainer = path.join('/app', path.relative(process.cwd(), pathToTm)).replace(/\\/g, '/').replace('/backend/', '/');
         imports += `import ${importName} from '${pathToTmInContainer}'\n`;
         mainFunction += `    server.configureTopicManager('${name}', new ${importName}())\n`;
     }
@@ -265,7 +283,7 @@ const main = async () => {
     // For each lookup service
     for (const [name, lsConfig] of Object.entries(deploymentInfo.lookupServices || {})) {
         const importName = `lsf_${name}`;
-        const pathToLsInContainer = path.join('/app', path.relative(process.cwd(), lsConfig.serviceFactory)).replace(/\\/g, '/');
+        const pathToLsInContainer = path.join('/app', path.relative(process.cwd(), lsConfig.serviceFactory)).replace(/\\/g, '/').replace('/backend/', '/');
         imports += `import ${importName} from '${pathToLsInContainer}'\n`;
         if (lsConfig.hydrateWith === 'mongo') {
             mainFunction += `    server.configureLookupServiceWithMongo('${name}', ${importName})\n`;
@@ -313,17 +331,22 @@ function generatePackageJson(backendDependencies) {
 }
 
 function generateDockerfile() {
-    return `# Use an official Node.js runtime as the base image
-FROM node:22-alpine
-
-# Set working directory inside the container
+    return `FROM node:22-alpine
 WORKDIR /app
+COPY ./local-data/overlay-dev-container/package.json .
+RUN npm i
+COPY ./local-data/overlay-dev-container/index.ts .
+COPY ./local-data/overlay-dev-container/tsconfig.json .
+COPY ./local-data/overlay-dev-container/wait-for-services.sh /wait-for-services.sh
+RUN chmod +x /wait-for-services.sh
+COPY ./backend/artifacts ./artifacts
+COPY ./backend/src ./src
 
 # Expose the application port
 EXPOSE 8080
 
 # Start the application
-CMD ["sh", "-c", "cd /app/backend && npm i --no-update-check --no-progress && cd /app && npm i --no-update-check --no-progress && npm run start"]`;
+CMD ["/wait-for-services.sh", "mysql", "3306", "mongo", "27017", "npm", "run", "start"]`;
 }
 
 function generateTsConfig() {
@@ -333,4 +356,66 @@ function generateTsConfig() {
         "emitDecoratorMetadata": true
     }
 }`;
+}
+
+function generateWaitScript() {
+    return `#!/bin/sh
+
+set -e
+
+host1="$1"
+port1="$2"
+host2="$3"
+port2="$4"
+shift 4
+
+echo "Waiting for $host1:$port1..."
+while ! nc -z $host1 $port1; do
+  sleep 1
+done
+echo "$host1:$port1 is up"
+
+echo "Waiting for $host2:$port2..."
+while ! nc -z $host2 $port2; do
+  sleep 1
+done
+echo "$host2:$port2 is up"
+
+exec "$@"`
+}
+
+const fundNinja = async (ninja, amount, ninjaPriv) => {
+    const derivationPrefix = crypto.randomBytes(10)
+        .toString('base64')
+    const derivationSuffix = crypto.randomBytes(10)
+        .toString('base64')
+    const derivedPublicKey = await getPublicKey({
+        counterparty: new PrivateKey(ninjaPriv, 'hex').toPublicKey().toString(),
+        protocolID: '3241645161d8',
+        keyID: `${derivationPrefix} ${derivationSuffix}`
+    })
+    const script = new P2PKH().lock(PublicKey.fromString(derivedPublicKey).toAddress()).toHex()
+    const outputs = [{
+        script,
+        satoshis: amount
+    }]
+    const transaction = await createAction({
+        outputs,
+        description: 'Funding Local Overlay Services host for development'
+    })
+    transaction.outputs = [{
+        vout: 0,
+        satoshis: amount,
+        derivationSuffix
+    }]
+    const directTransaction = {
+        derivationPrefix,
+        transaction,
+        senderIdentityKey: await getPublicKey({ identityKey: true }),
+        protocol: '3241645161d8',
+        note: 'Incoming payment from KeyFunder'
+    }
+    console.log('tx', JSON.stringify(directTransaction, null, 2))
+    await ninja.submitDirectTransaction(directTransaction)
+    console.log('ninja funded!')
 }
