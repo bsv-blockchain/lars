@@ -10,7 +10,7 @@ const yaml = require('yaml');
 const os = require('os');
 const crypto = require('crypto');
 const { Ninja } = require('ninja-base');
-const { getPublicKey, createAction } = require('@babbage/sdk-ts');
+const { getPublicKey, createAction, getVersion } = require('@babbage/sdk-ts');
 const { P2PKH, PrivateKey, PublicKey } = require('@bsv/sdk');
 const figlet = require('figlet');
 
@@ -58,6 +58,14 @@ program
                 execSync('ngrok version', { stdio: 'ignore' });
             } catch (err) {
                 console.error(chalk.red('❌ ngrok is not installed.'));
+                process.exit(1);
+            }
+
+            // Check MetaNet Client
+            try {
+                await getVersion()
+            } catch (err) {
+                console.error(chalk.red('❌ MetaNet Client is not installed. Launch the app or download from https://projectbabbage.com.'));
                 process.exit(1);
             }
 
@@ -296,15 +304,14 @@ function generateDockerCompose(hostingUrl, localDataPath, serverPrivateKey) {
                     KNEX_URL: 'mysql://overlayAdmin:overlay123@mysql:3306/overlay',
                     SERVER_PRIVATE_KEY: serverPrivateKey,
                     HOSTING_URL: hostingUrl,
-                    NO_UPDATE_NOTIFIER: '1'
                 },
                 depends_on: [
                     'mysql',
                     'mongo'
                 ],
                 volumes: [
-                    `${path.resolve(process.cwd(), 'src')}:/app/backend/src`,
-                    `${path.resolve(process.cwd(), 'artifacts')}:/app/backend/artifacts`
+                    `${path.resolve(process.cwd(), 'backend', 'src')}:/app/src`,
+                    `${path.resolve(process.cwd(), 'backend', 'artifacts')}:/app/artifacts`
                 ]
             },
             mysql: {
