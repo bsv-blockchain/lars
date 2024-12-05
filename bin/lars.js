@@ -14,12 +14,293 @@ const { getPublicKey, createAction, getVersion } = require('@babbage/sdk-ts');
 const { P2PKH, PrivateKey, PublicKey } = require('@bsv/sdk');
 const figlet = require('figlet');
 
+const LOCAL_DATA_PATH = path.resolve(process.cwd(), 'local-data');
+const LARS_CONFIG_PATH = path.join(LOCAL_DATA_PATH, 'lars-config.json');
+const DEPLOYMENT_INFO_PATH = path.resolve(process.cwd(), 'deployment-info.json');
+
+// Default config structure
+function getDefaultConfig() {
+    return {
+        serverPrivateKey: null,
+        arcApiKey: null,
+        enableRequestLogging: true,
+        enableGASPSync: false
+    };
+}
+
+// Load or create config
+async function loadOrCreateConfig(interactive = true) {
+    const { default: chalk } = await import('chalk');
+    const { default: inquirer } = await import('inquirer');
+
+    // If config exists, load it
+    if (fs.existsSync(LARS_CONFIG_PATH)) {
+        const existingConfig = JSON.parse(fs.readFileSync(LARS_CONFIG_PATH, 'utf-8'));
+        return { ...getDefaultConfig(), ...existingConfig };
+    }
+
+    if (!interactive) {
+        return getDefaultConfig();
+    }
+
+    // If no config, prompt user to create it
+    console.log(chalk.yellow('⚠️ No LARS config found. Let\'s create one!'));
+
+    // Prompt for server private key
+    let serverPrivateKey;
+    const { action: keyAction } = await inquirer.prompt([
+        {
+            type: 'list',
+            name: 'action',
+            message: 'Do you want to generate a new private key or enter an existing one?',
+            choices: ['🔑 Generate new key', '✏️ Enter existing key'],
+        },
+    ]);
+
+    if (keyAction === '🔑 Generate new key') {
+        serverPrivateKey = crypto.randomBytes(32).toString('hex');
+        console.log(chalk.green('✨ New private key generated.'));
+    } else {
+        const { enteredKey } = await inquirer.prompt([
+            {
+                type: 'password',
+                name: 'enteredKey',
+                message: 'Enter your private key (64-char hex):',
+                mask: '*',
+                validate: function (value) {
+                    if (/^[0-9a-fA-F]{64}$/.test(value)) {
+                        return true;
+                    }
+                    return 'Please enter a valid 64-character hexadecimal string.';
+                },
+            },
+        ]);
+        serverPrivateKey = enteredKey.toLowerCase();
+        console.log(chalk.green('🔐 Private key set.'));
+    }
+
+    // Prompt for ARC API key (optional)
+    const { setArcKey } = await inquirer.prompt([
+        {
+            type: 'confirm',
+            name: 'setArcKey',
+            message: 'Do you have an ARC API key to set? (optional)',
+            default: false
+        }
+    ]);
+
+    let arcApiKey = null;
+    if (setArcKey) {
+        const { enteredArcKey } = await inquirer.prompt([
+            {
+                type: 'input',
+                name: 'enteredArcKey',
+                message: 'Enter your ARC API key:',
+            },
+        ]);
+        arcApiKey = enteredArcKey.trim();
+        console.log(chalk.green('🔑 ARC API key set.'));
+    }
+
+    // Prompt for request logging
+    const { enableRequestLogging } = await inquirer.prompt([
+        {
+            type: 'confirm',
+            name: 'enableRequestLogging',
+            message: 'Enable request logging in Overlay Express?',
+            default: true
+        }
+    ]);
+
+    // Prompt for GASP sync
+    const { enableGASPSync } = await inquirer.prompt([
+        {
+            type: 'confirm',
+            name: 'enableGASPSync',
+            message: 'Enable GASP sync?',
+            default: false
+        }
+    ]);
+
+    const newConfig = {
+        serverPrivateKey,
+        arcApiKey,
+        enableRequestLogging,
+        enableGASPSync
+    };
+
+    fs.ensureDirSync(LOCAL_DATA_PATH);
+    fs.writeFileSync(LARS_CONFIG_PATH, JSON.stringify(newConfig, null, 2));
+    console.log(chalk.green('✅ LARS config created.'));
+
+    return newConfig;
+}
+
+// Edit config interactively
+async function editConfig() {
+    const { default: chalk } = await import('chalk');
+    const { default: inquirer } = await import('inquirer');
+
+    if (!fs.existsSync(LARS_CONFIG_PATH)) {
+        console.log(chalk.yellow('⚠️ No LARS config found. Creating a new one...'));
+        await loadOrCreateConfig();
+    }
+
+    const config = JSON.parse(fs.readFileSync(LARS_CONFIG_PATH, 'utf-8'));
+    const ninja = new Ninja({ privateKey: config.serverPrivateKey });
+    let { total: balance } = await ninja.getTotalValue();
+
+    // Interactive menu
+    const choices = [
+        { name: 'View/change server private key', value: 'key' },
+        { name: `View/change ARC API key (current: ${config.arcApiKey ? 'set' : 'not set'})`, value: 'arc' },
+        { name: `Toggle request logging (current: ${config.enableRequestLogging ? 'enabled' : 'disabled'})`, value: 'reqlog' },
+        { name: `Toggle GASP sync (current: ${config.enableGASPSync ? 'enabled' : 'disabled'})`, value: 'gasp' },
+        { name: `Check/fund server balance (current balance: ${balance} satoshis)`, value: 'fund' },
+        { name: 'Save and exit', value: 'save' }
+    ];
+
+    let done = false;
+    while (!done) {
+        const { action } = await inquirer.prompt([
+            {
+                type: 'list',
+                name: 'action',
+                message: 'LARS Configuration Menu',
+                choices
+            }
+        ]);
+
+        if (action === 'key') {
+            const { action: keyAction } = await inquirer.prompt([
+                {
+                    type: 'list',
+                    name: 'action',
+                    message: 'Set a new private key or generate one?',
+                    choices: ['🔑 Generate new key', '✏️ Enter existing key', 'Cancel']
+                }
+            ]);
+
+            if (keyAction === '🔑 Generate new key') {
+                config.serverPrivateKey = crypto.randomBytes(32).toString('hex');
+                console.log(chalk.green('✨ New private key generated.'));
+            } else if (keyAction === '✏️ Enter existing key') {
+                const { enteredKey } = await inquirer.prompt([
+                    {
+                        type: 'password',
+                        name: 'enteredKey',
+                        message: 'Enter your private key (64-char hex):',
+                        mask: '*',
+                        validate: function (value) {
+                            if (/^[0-9a-fA-F]{64}$/.test(value)) {
+                                return true;
+                            }
+                            return 'Please enter a valid 64-character hexadecimal string.';
+                        },
+                    },
+                ]);
+                config.serverPrivateKey = enteredKey.toLowerCase();
+                console.log(chalk.green('🔐 Private key set.'));
+            }
+            // Update ninja and balance after key change
+            const ninjaNew = new Ninja({ privateKey: config.serverPrivateKey });
+            balance = (await ninjaNew.getTotalValue()).total;
+            choices[4].name = `Check/fund server balance (current balance: ${balance} satoshis)`;
+        } else if (action === 'arc') {
+            const { enteredArcKey } = await inquirer.prompt([
+                {
+                    type: 'input',
+                    name: 'enteredArcKey',
+                    message: 'Enter your ARC API key (leave blank to unset):',
+                },
+            ]);
+            config.arcApiKey = enteredArcKey.trim() || null;
+            console.log(chalk.green('🔑 ARC API key updated.'));
+            choices[1].name = `View/change ARC API key (current: ${config.arcApiKey ? 'set' : 'not set'})`;
+        } else if (action === 'reqlog') {
+            config.enableRequestLogging = !config.enableRequestLogging;
+            console.log(chalk.green(`Request logging is now ${config.enableRequestLogging ? 'enabled' : 'disabled'}.`));
+            choices[2].name = `Toggle request logging (current: ${config.enableRequestLogging ? 'enabled' : 'disabled'})`;
+        } else if (action === 'gasp') {
+            config.enableGASPSync = !config.enableGASPSync;
+            console.log(chalk.green(`GASP sync is now ${config.enableGASPSync ? 'enabled' : 'disabled'}.`));
+            choices[3].name = `Toggle GASP sync (current: ${config.enableGASPSync ? 'enabled' : 'disabled'})`;
+        } else if (action === 'fund') {
+            if (balance < 10000) {
+                console.log(chalk.red(`⚠️  Your server's balance is low: ${balance} satoshis.`));
+                const { action: fundAction } = await inquirer.prompt([
+                    {
+                        type: 'list',
+                        name: 'action',
+                        message: 'Your server\'s balance is low. What would you like to do?',
+                        choices: [
+                            '💰 Fund server automatically (using local MetaNet Client)',
+                            '📝 Print manual funding instructions',
+                            '🚀 Continue without funding'
+                        ],
+                    },
+                ]);
+
+                if (fundAction === '💰 Fund server automatically (using local MetaNet Client)') {
+                    const { amountToFund } = await inquirer.prompt([
+                        {
+                            type: 'input',
+                            name: 'amountToFund',
+                            message: 'Enter the amount to fund (in satoshis):',
+                            default: '30000',
+                            validate: function (value) {
+                                const valid = !isNaN(parseInt(value)) && parseInt(value) > 0;
+                                return valid || 'Please enter a positive number.';
+                            },
+                            filter: Number,
+                        },
+                    ]);
+                    const ninjaFunder = new Ninja({ privateKey: config.serverPrivateKey });
+                    await fundNinja(ninjaFunder, amountToFund, config.serverPrivateKey);
+                    console.log(chalk.green(`🎉 Server funded with ${amountToFund} satoshis.`));
+                    balance = (await ninjaFunder.getTotalValue()).total;
+                    choices[4].name = `Check/fund server balance (current balance: ${balance} satoshis)`;
+                } else if (fundAction === '📝 Print manual funding instructions') {
+                    console.log(chalk.blue('\nManual Funding Instructions:'));
+                    console.log('1. Use KeyFunder to fund your server.');
+                    console.log(`2. Your server's Ninja private key is: ${config.serverPrivateKey}`);
+                    console.log('3. Visit https://keyfunder.babbage.systems and follow the instructions.');
+                    await inquirer.prompt([
+                        {
+                            type: 'input',
+                            name: 'wait',
+                            message: 'Press enter when you\'re ready to continue.',
+                        },
+                    ]);
+                } else {
+                    console.log(chalk.yellow('🚀 Continuing without funding.'));
+                }
+            } else {
+                console.log(chalk.green(`✅ Server balance is sufficient: ${balance} satoshis.`));
+            }
+        } else if (action === 'save') {
+            // Save config and exit
+            fs.writeFileSync(LARS_CONFIG_PATH, JSON.stringify(config, null, 2));
+            console.log(chalk.green('✅ LARS config saved.'));
+            done = true;
+        }
+    }
+}
+
+program
+    .command('config')
+    .description('Edit LARS configuration')
+    .action(async () => {
+        await editConfig();
+    });
+
 program
     .command('start')
     .description('Start LARS development environment')
     .action(async () => {
         const { default: chalk } = await import('chalk');
         const { default: inquirer } = await import('inquirer');
+
         try {
             console.log(
                 chalk.yellow(
@@ -29,13 +310,15 @@ program
             console.log(chalk.green('Welcome to the LARS development environment! 🚀'));
             console.log(chalk.green("Let's get your local Overlay Services up and running!\n"));
 
+            // Load config (or create if not present)
+            const config = await loadOrCreateConfig();
+
             // Step 1: Parse and validate deployment-info.json
-            const deploymentInfoPath = path.resolve(process.cwd(), 'deployment-info.json');
-            if (!fs.existsSync(deploymentInfoPath)) {
+            if (!fs.existsSync(DEPLOYMENT_INFO_PATH)) {
                 console.error(chalk.red('❌ deployment-info.json not found in the current directory.'));
                 process.exit(1);
             }
-            const deploymentInfo = JSON.parse(fs.readFileSync(deploymentInfoPath, 'utf-8'));
+            const deploymentInfo = JSON.parse(fs.readFileSync(DEPLOYMENT_INFO_PATH, 'utf-8'));
 
             // Step 2: Check for system dependencies
             console.log(chalk.blue('🔍 Checking system dependencies...'));
@@ -44,6 +327,7 @@ program
                 execSync('docker --version', { stdio: 'ignore' });
             } catch (err) {
                 console.error(chalk.red('❌ Docker is not installed or not running.'));
+                console.log(chalk.blue('👉 Install Docker: https://docs.docker.com/engine/install/'));
                 process.exit(1);
             }
             // Check Docker Compose
@@ -51,6 +335,7 @@ program
                 execSync('docker compose version', { stdio: 'ignore' });
             } catch (err) {
                 console.error(chalk.red('❌ Docker Compose plugin is not installed.'));
+                console.log(chalk.blue('👉 Install Docker Compose: https://docs.docker.com/compose/install/'));
                 process.exit(1);
             }
             // Check ngrok
@@ -58,21 +343,22 @@ program
                 execSync('ngrok version', { stdio: 'ignore' });
             } catch (err) {
                 console.error(chalk.red('❌ ngrok is not installed.'));
+                console.log(chalk.blue('👉 Install ngrok: https://ngrok.com/download'));
                 process.exit(1);
             }
 
             // Check MetaNet Client
             try {
-                await getVersion()
+                await getVersion();
             } catch (err) {
-                console.error(chalk.red('❌ MetaNet Client is not installed. Launch the app or download from https://projectbabbage.com.'));
+                console.error(chalk.red('❌ MetaNet Client is not installed or not running.'));
+                console.log(chalk.blue('👉 Download MetaNet Client: https://projectbabbage.com/'));
                 process.exit(1);
             }
 
             // Check write access to ./local-data
-            const localDataPath = path.resolve(process.cwd(), 'local-data');
             try {
-                fs.ensureDirSync(localDataPath);
+                fs.ensureDirSync(LOCAL_DATA_PATH);
             } catch (err) {
                 console.error(chalk.red('❌ Cannot write to ./local-data directory.'));
                 process.exit(1);
@@ -83,61 +369,8 @@ program
             const ngrokUrl = await ngrok.connect({ addr: 8080 });
             console.log(chalk.green(`🚀 ngrok tunnel established at ${ngrokUrl}`));
 
-            // Save HOSTING_URL for later use
-            const hostingUrl = ngrokUrl;
-
-            // Generate a server private key
-            let serverPrivateKeyPath = path.resolve(localDataPath, 'server-private-key.txt');
-            let serverPrivateKey;
-
-            if (fs.existsSync(serverPrivateKeyPath)) {
-                serverPrivateKey = fs.readFileSync(serverPrivateKeyPath, 'utf-8').trim();
-                // Validate 64-character lowercase hex string
-                if (!/^[0-9a-f]{64}$/.test(serverPrivateKey)) {
-                    console.error(chalk.red('❌ Invalid private key format in server-private-key.txt'));
-                    process.exit(1);
-                }
-            } else {
-                console.log(chalk.yellow('⚠️  No server private key found.'));
-                const { action } = await inquirer.prompt([
-                    {
-                        type: 'list',
-                        name: 'action',
-                        message: 'Do you want to generate a new private key or enter an existing one?',
-                        choices: ['🔑 Generate new key', '✏️ Enter existing key'],
-                    },
-                ]);
-
-                if (action === '🔑 Generate new key') {
-                    serverPrivateKey = crypto.randomBytes(32).toString('hex');
-                    fs.writeFileSync(serverPrivateKeyPath, serverPrivateKey);
-                    console.log(chalk.green('✨ New private key generated and saved to server-private-key.txt'));
-                } else {
-                    const { enteredKey } = await inquirer.prompt([
-                        {
-                            type: 'password',
-                            name: 'enteredKey',
-                            message: 'Enter your private key (hex format):',
-                            mask: '*',
-                            validate: function (value) {
-                                if (/^[0-9a-fA-F]{64}$/.test(value)) {
-                                    return true;
-                                }
-                                return 'Please enter a valid 64-character hexadecimal string.';
-                            },
-                        },
-                    ]);
-
-                    serverPrivateKey = enteredKey.toLowerCase();
-                    fs.writeFileSync(serverPrivateKeyPath, serverPrivateKey);
-                    console.log(chalk.green('🔐 Private key saved to server-private-key.txt'));
-                }
-            }
-
-            // Check balance and fund if necessary
-            const ninja = new Ninja({
-                privateKey: serverPrivateKey
-            });
+            // Generate a ninja and check balance
+            const ninja = new Ninja({ privateKey: config.serverPrivateKey });
             const { total: balance } = await ninja.getTotalValue();
             if (balance < 10000) {
                 console.log(chalk.red(`⚠️  Your server's balance is low: ${balance} satoshis.`));
@@ -168,17 +401,17 @@ program
                             filter: Number,
                         },
                     ]);
-                    await fundNinja(ninja, amountToFund, serverPrivateKey);
+                    await fundNinja(ninja, amountToFund, config.serverPrivateKey);
                     console.log(chalk.green(`🎉 Server funded with ${amountToFund} satoshis.`));
                 } else if (action === '📝 Print manual funding instructions') {
                     console.log(chalk.blue('\nManual Funding Instructions:'));
                     console.log('1. Use KeyFunder to fund your server.');
-                    console.log(`2. Your server's Ninja private key is: ${serverPrivateKey}`);
+                    console.log(`2. Your server's Ninja private key is: ${config.serverPrivateKey}`);
                     console.log('3. Visit https://keyfunder.babbage.systems and follow the instructions.');
-                    await inquirer.prompt([ // TODO: Use the correct "wait" prompt.
+                    await inquirer.prompt([
                         {
                             type: 'input',
-                            name: 'amountToFund',
+                            name: 'wait',
                             message: 'Press enter when you\'re ready to continue.',
                         },
                     ]);
@@ -191,19 +424,19 @@ program
 
             // Step 4: Generate docker-compose.yml
             console.log(chalk.blue('\n📝 Generating docker-compose.yml...'));
-            const composeContent = generateDockerCompose(hostingUrl, localDataPath, serverPrivateKey);
+            const composeContent = generateDockerCompose(ngrokUrl, LOCAL_DATA_PATH, config.serverPrivateKey);
             const composeYaml = yaml.stringify(composeContent);
-            const composeFilePath = path.join(localDataPath, 'docker-compose.yml');
+            const composeFilePath = path.join(LOCAL_DATA_PATH, 'docker-compose.yml');
             fs.writeFileSync(composeFilePath, composeYaml);
             console.log(chalk.green('✅ docker-compose.yml generated.'));
 
-            // Step 5: Generate index.ts, package.json, Dockerfile
+            // Step 5: Generate overlay-dev-container files
             console.log(chalk.blue('\n📁 Generating overlay-dev-container files...'));
-            const overlayDevContainerPath = path.join(localDataPath, 'overlay-dev-container');
+            const overlayDevContainerPath = path.join(LOCAL_DATA_PATH, 'overlay-dev-container');
             fs.ensureDirSync(overlayDevContainerPath);
 
             // Generate index.ts
-            const indexTsContent = generateIndexTs(deploymentInfo);
+            const indexTsContent = generateIndexTs(deploymentInfo, config);
             fs.writeFileSync(path.join(overlayDevContainerPath, 'index.ts'), indexTsContent);
 
             // Generate package.json
@@ -234,7 +467,7 @@ program
             // Step 6: Start Docker Compose
             console.log(chalk.blue('\n🐳 Starting Docker Compose...'));
             const dockerComposeUp = spawn('docker', ['compose', 'up', '--build'], {
-                cwd: localDataPath,
+                cwd: LOCAL_DATA_PATH,
                 stdio: 'inherit'
             });
 
@@ -278,6 +511,7 @@ program
             console.log(chalk.green('\n🎉 LARS development environment is up and running! Happy coding!'));
 
         } catch (err) {
+            const { default: chalk } = await import('chalk');
             console.error(chalk.red('❌ Error starting LARS:', err));
             process.exit(0);
         }
@@ -303,7 +537,7 @@ function generateDockerCompose(hostingUrl, localDataPath, serverPrivateKey) {
                     MONGO_URL: 'mongodb://mongo:27017/overlay-db',
                     KNEX_URL: 'mysql://overlayAdmin:overlay123@mysql:3306/overlay',
                     SERVER_PRIVATE_KEY: serverPrivateKey,
-                    HOSTING_URL: hostingUrl,
+                    HOSTING_URL: hostingUrl
                 },
                 depends_on: [
                     'mysql',
@@ -344,14 +578,15 @@ function generateDockerCompose(hostingUrl, localDataPath, serverPrivateKey) {
                 ],
                 volumes: [
                     `${path.resolve(localDataPath, 'mongo')}:/data/db`
-                ]
+                ],
+                command: ["mongod", "--quiet"] // reduces verbosity of Mongo logs
             }
         }
     };
     return composeContent;
 }
 
-function generateIndexTs(deploymentInfo) {
+function generateIndexTs(deploymentInfo, config) {
     let imports = `
 import OverlayExpress from '@bsv/overlay-express'
 `;
@@ -365,11 +600,15 @@ const main = async () => {
     )
 
     server.configurePort(8080)
-    server.configureVerboseRequestLogging(true)
+    server.configureVerboseRequestLogging(${config.enableRequestLogging})
     await server.configureKnex(process.env.KNEX_URL!)
     await server.configureMongo(process.env.MONGO_URL!)
-    server.configureEnableGASPSync(false)
+    server.configureEnableGASPSync(${config.enableGASPSync})
 `;
+
+    if (config.arcApiKey) {
+        mainFunction += `    server.configureArcApiKey("${config.arcApiKey}")\n`;
+    }
 
     // For each topic manager
     for (const [name, pathToTm] of Object.entries(deploymentInfo.topicManagers || {})) {
@@ -418,7 +657,7 @@ function generatePackageJson(backendDependencies) {
         "license": "ISC",
         "dependencies": {
             ...backendDependencies,
-            "@bsv/overlay-express": "^0.1.7",
+            "@bsv/overlay-express": "^0.1.9",
             "mysql2": "^3.11.5",
             "tsx": "^4.19.2"
         },
