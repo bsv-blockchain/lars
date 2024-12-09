@@ -424,11 +424,9 @@ program
 
             // Determine whether sCrypt contracts are enabled
             let enableContracts = false
-            let contractDirectory
-            if (deploymentInfo.contracts) {
+            if (deploymentInfo.contracts && Object.keys(deploymentInfo.contracts) > 0) {
                 if (deploymentInfo.contracts.language === 'sCrypt') {
                     enableContracts = true
-                    contractDirectory = deploymentInfo.contracts.baseDirectory
                 } else {
                     console.error(chalk.red(`❌ BSV Contract language not supported: ${deploymentInfo.contracts.language}`));
                     process.exit(1);
@@ -437,7 +435,7 @@ program
 
             // Step 4: Generate docker-compose.yml
             console.log(chalk.blue('\n📝 Generating docker-compose.yml...'));
-            const composeContent = generateDockerCompose(ngrokUrl, LOCAL_DATA_PATH, config.serverPrivateKey, enableContracts, contractDirectory);
+            const composeContent = generateDockerCompose(ngrokUrl, LOCAL_DATA_PATH, config.serverPrivateKey, enableContracts);
             const composeYaml = yaml.stringify(composeContent);
             const composeFilePath = path.join(LOCAL_DATA_PATH, 'docker-compose.yml');
             fs.writeFileSync(composeFilePath, composeYaml);
@@ -472,7 +470,7 @@ program
             fs.writeFileSync(path.join(overlayDevContainerPath, 'wait-for-services.sh'), generateWaitScript());
 
             // Generate Dockerfile
-            const dockerfileContent = generateDockerfile(enableContracts, contractDirectory);
+            const dockerfileContent = generateDockerfile(enableContracts);
             fs.writeFileSync(path.join(overlayDevContainerPath, 'Dockerfile'), dockerfileContent);
 
             console.log(chalk.green('✅ overlay-dev-container files generated.'));
@@ -533,7 +531,7 @@ program
 program.parse(process.argv);
 
 // Helper functions
-function generateDockerCompose(hostingUrl, localDataPath, serverPrivateKey, enableContracts, contractDirectory) {
+function generateDockerCompose(hostingUrl, localDataPath, serverPrivateKey, enableContracts) {
     const composeContent = {
         services: {
             'overlay-dev-container': {
@@ -683,7 +681,7 @@ function generatePackageJson(backendDependencies) {
     return packageJsonContent;
 }
 
-function generateDockerfile(enableContracts, contractDirectory) {
+function generateDockerfile(enableContracts) {
     let file = `FROM node:22-alpine
 WORKDIR /app
 COPY ./local-data/overlay-dev-container/package.json .
@@ -704,6 +702,7 @@ EXPOSE 8080
 
 # Start the application
 CMD ["/wait-for-services.sh", "mysql", "3306", "mongo", "27017", "npm", "run", "start"]`;
+    return file;
 }
 
 function generateTsConfig() {
