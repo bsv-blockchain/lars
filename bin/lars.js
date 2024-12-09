@@ -422,9 +422,22 @@ program
                 console.log(chalk.green(`✅ Server balance is sufficient: ${balance} satoshis.`));
             }
 
+            // Determine whether sCrypt contracts are enabled
+            let enableContracts = false
+            let contractDirectory
+            if (deploymentInfo.contracts) {
+                if (deploymentInfo.contracts.language === 'sCrypt') {
+                    enableContracts = true
+                    contractDirectory = deploymentInfo.contracts.baseDirectory
+                } else {
+                    console.error(chalk.red(`❌ BSV Contract language not supported: ${deploymentInfo.contracts.language}`));
+                    process.exit(1);
+                }
+            }
+
             // Step 4: Generate docker-compose.yml
             console.log(chalk.blue('\n📝 Generating docker-compose.yml...'));
-            const composeContent = generateDockerCompose(ngrokUrl, LOCAL_DATA_PATH, config.serverPrivateKey);
+            const composeContent = generateDockerCompose(ngrokUrl, LOCAL_DATA_PATH, config.serverPrivateKey, enableContracts, contractDirectory);
             const composeYaml = yaml.stringify(composeContent);
             const composeFilePath = path.join(LOCAL_DATA_PATH, 'docker-compose.yml');
             fs.writeFileSync(composeFilePath, composeYaml);
@@ -459,7 +472,7 @@ program
             fs.writeFileSync(path.join(overlayDevContainerPath, 'wait-for-services.sh'), generateWaitScript());
 
             // Generate Dockerfile
-            const dockerfileContent = generateDockerfile();
+            const dockerfileContent = generateDockerfile(enableContracts, contractDirectory);
             fs.writeFileSync(path.join(overlayDevContainerPath, 'Dockerfile'), dockerfileContent);
 
             console.log(chalk.green('✅ overlay-dev-container files generated.'));
@@ -490,7 +503,7 @@ program
             watcher.on('all', (event, filePath) => {
                 console.log(chalk.yellow(`🔄 File ${event}: ${filePath}`));
 
-                if (filePath.startsWith(path.join(backendSrcPath, 'contracts'))) {
+                if (filePath.startsWith(path.join(backendSrcPath, 'contracts')) && enableContracts) {
                     // Run npm run compile in backend
                     console.log(chalk.blue('🔨 Changes detected in contracts directory. Running npm run compile...'));
                     const compileProcess = spawn('npm', ['run', 'compile'], {
@@ -520,7 +533,7 @@ program
 program.parse(process.argv);
 
 // Helper functions
-function generateDockerCompose(hostingUrl, localDataPath, serverPrivateKey) {
+function generateDockerCompose(hostingUrl, localDataPath, serverPrivateKey, enableContracts, contractDirectory) {
     const composeContent = {
         services: {
             'overlay-dev-container': {
@@ -544,8 +557,7 @@ function generateDockerCompose(hostingUrl, localDataPath, serverPrivateKey) {
                     'mongo'
                 ],
                 volumes: [
-                    `${path.resolve(process.cwd(), 'backend', 'src')}:/app/src`,
-                    `${path.resolve(process.cwd(), 'backend', 'artifacts')}:/app/artifacts`
+                    `${path.resolve(process.cwd(), 'backend', 'src')}:/app/src`
                 ]
             },
             mysql: {
@@ -583,6 +595,9 @@ function generateDockerCompose(hostingUrl, localDataPath, serverPrivateKey) {
             }
         }
     };
+    if (enableContracts) {
+        composeContent.services['overlay-dev-container'].volumes.push(`${path.resolve(process.cwd(), 'backend', 'artifacts')}:/app/artifacts`)
+    }
     return composeContent;
 }
 
@@ -668,16 +683,20 @@ function generatePackageJson(backendDependencies) {
     return packageJsonContent;
 }
 
-function generateDockerfile() {
-    return `FROM node:22-alpine
+function generateDockerfile(enableContracts, contractDirectory) {
+    let file = `FROM node:22-alpine
 WORKDIR /app
 COPY ./local-data/overlay-dev-container/package.json .
 RUN npm i
 COPY ./local-data/overlay-dev-container/index.ts .
 COPY ./local-data/overlay-dev-container/tsconfig.json .
 COPY ./local-data/overlay-dev-container/wait-for-services.sh /wait-for-services.sh
-RUN chmod +x /wait-for-services.sh
-COPY ./backend/artifacts ./artifacts
+RUN chmod +x /wait-for-services.sh`
+    if (enableContracts) {
+        file += `
+COPY ./backend/artifacts ./artifacts`
+    }
+    file += `
 COPY ./backend/src ./src
 
 # Expose the application port
