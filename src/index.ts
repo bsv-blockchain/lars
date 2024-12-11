@@ -12,8 +12,9 @@ import yaml from 'yaml';
 import crypto from 'crypto';
 import ngrok from 'ngrok';
 import { Ninja, NinjaSubmitDirectTransactionApi, NinjaSubmitDirectTransactionParams } from 'ninja-base';
-import { getPublicKey, createAction, getVersion } from '@babbage/sdk-ts';
+import { getPublicKey, createAction, getVersion, getNetwork } from '@babbage/sdk-ts';
 import { P2PKH, PrivateKey, PublicKey } from '@bsv/sdk';
+import { Mode, WriteFileOptions } from 'fs';
 
 /////////////////////////////////////////////////////////////////////////////////////
 // Constants and Types
@@ -222,7 +223,12 @@ async function promptYesNo(message: string, defaultVal = true): Promise<boolean>
     return answer;
 }
 
-async function fundNinja(ninja: Ninja, amount: number, ninjaPriv: string) {
+async function fundNinja(ninja: Ninja, amount: number, ninjaPriv: string, network: 'mainnet' | 'testnet') {
+    const babbageNet = await getNetwork()
+    if (network !== babbageNet) {
+        console.warn(chalk.red(`The currently-running MetaNet Client is on ${babbageNet} but LARS is configured for ${network}, therefore funding is impossible.`))
+        return;
+    }
     const derivationPrefix = crypto.randomBytes(10).toString('base64');
     const derivationSuffix = crypto.randomBytes(10).toString('base64');
     const derivedPublicKey = await getPublicKey({
@@ -626,10 +632,9 @@ async function startLARS(larsConfig: CARSConfig, projectConfig: LARSConfigLocal)
         process.exit(1);
     }
 
-    // Start ngrok
-    console.log(chalk.blue('🌐 Starting ngrok...'));
-    const ngrokUrl = await ngrok.connect({ addr: 8080 });
-    console.log(chalk.green(`🚀 ngrok tunnel established at ${ngrokUrl}`));
+    if (network === 'testnet') {
+        console.error(chalk.red('❌❌❌❌❌ Network = testnet is almost certainly broken until Q2 2025, please strongly consider using mainnet for now.'));
+    }
 
     // Check server funding
     const ninja = new Ninja({ privateKey: finalServerKey });
@@ -663,7 +668,7 @@ async function startLARS(larsConfig: CARSConfig, projectConfig: LARSConfigLocal)
                     filter: Number,
                 },
             ]);
-            await fundNinja(ninja, amountToFund, finalServerKey);
+            await fundNinja(ninja, amountToFund, finalServerKey, network);
             console.log(chalk.green(`🎉 Server funded with ${amountToFund} satoshis.`));
         } else if (action.startsWith('📝')) {
             console.log(chalk.blue('\nManual Funding Instructions:'));
@@ -684,6 +689,11 @@ async function startLARS(larsConfig: CARSConfig, projectConfig: LARSConfigLocal)
         console.log(chalk.green(`✅ Server balance is sufficient: ${balance} satoshis.`));
     }
 
+    // Start ngrok
+    console.log(chalk.blue('🌐 Starting ngrok...'));
+    const ngrokUrl = await ngrok.connect({ addr: 8080 });
+    console.log(chalk.green(`🚀 ngrok tunnel established at ${ngrokUrl}`));
+
     // Check contracts
     const info = loadDeploymentInfo();
     let enableContracts = false;
@@ -694,6 +704,8 @@ async function startLARS(larsConfig: CARSConfig, projectConfig: LARSConfigLocal)
         process.exit(1);
     }
 
+    // Ensure local data dir and write docker-compose.yml
+    ensureLocalDataDir();
     const composeContent = generateDockerCompose(
         ngrokUrl,
         LOCAL_DATA_PATH,
