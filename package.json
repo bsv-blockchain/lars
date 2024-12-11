@@ -2,12 +2,13 @@
     "name": "@bsv/lars",
     "version": "1.0.6",
     "description": "Local Automated Runtime System for BSV application development",
-    "main": "index.js",
+    "main": "dist/index.js",
+    "type": "module",
     "bin": {
-        "lars": "./bin/lars.js"
+        "lars": "dist/index.js"
     },
     "scripts": {
-        "start": "node ./bin/lars.js"
+        "build": "tsc -b"
     },
     "keywords": [
         "bsv",
@@ -32,5 +33,10 @@
         "ninja-base": "^0.3.46",
         "tsx": "^3.12.7",
         "yaml": "^2.2.1"
+    },
+    "devDependencies": {
+        "@types/node": "^22.10.1",
+        "@types/tar": "^6.1.13",
+        "typescript": "^5.7.2"
     }
 }
