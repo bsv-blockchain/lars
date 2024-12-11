@@ -14,7 +14,6 @@ import ngrok from 'ngrok';
 import { Ninja, NinjaSubmitDirectTransactionApi, NinjaSubmitDirectTransactionParams } from 'ninja-base';
 import { getPublicKey, createAction, getVersion } from '@babbage/sdk-ts';
 import { P2PKH, PrivateKey, PublicKey } from '@bsv/sdk';
-import { verifyTruthy } from '@babbage/sdk-ts/out/src/utils/Helpers.js';
 
 /////////////////////////////////////////////////////////////////////////////////////
 // Constants and Types
@@ -43,13 +42,20 @@ interface CARSConfigInfo {
     configs?: CARSConfig[];
 }
 
-interface LARSConfigLocal {
-    // Project-level config
-    // Overridden from global if specified
+interface NetworkKeys {
     serverPrivateKey?: string;
     arcApiKey?: string;
-    enableRequestLogging?: boolean;
-    enableGASPSync?: boolean;
+}
+
+interface ProjectKeys {
+    mainnet: NetworkKeys;
+    testnet: NetworkKeys;
+}
+
+interface LARSConfigLocal {
+    projectKeys: ProjectKeys;
+    enableRequestLogging: boolean;
+    enableGASPSync: boolean;
 }
 
 interface GlobalKeys {
@@ -79,8 +85,10 @@ const GLOBAL_KEYS_PATH = path.join(os.homedir(), '.lars-keys.json');
 
 function getDefaultProjectConfig(): LARSConfigLocal {
     return {
-        serverPrivateKey: undefined,
-        arcApiKey: undefined,
+        projectKeys: {
+            mainnet: { serverPrivateKey: undefined, arcApiKey: undefined },
+            testnet: { serverPrivateKey: undefined, arcApiKey: undefined }
+        },
         enableRequestLogging: true,
         enableGASPSync: false
     };
@@ -142,7 +150,7 @@ async function promptForPrivateKey(): Promise<string> {
         {
             type: 'list',
             name: 'action',
-            message: 'Do you want to generate a new private key or enter an existing one?',
+            message: 'Do you want to generate a new server private key or enter an existing one?',
             choices: [
                 { name: '🔑 Generate new key', value: 'generate' },
                 { name: '✏️ Enter existing key', value: 'enter' }
@@ -159,7 +167,7 @@ async function promptForPrivateKey(): Promise<string> {
             {
                 type: 'password',
                 name: 'enteredKey',
-                message: 'Enter your private key (64-char hex):',
+                message: 'Enter your server private key (64-char hex):',
                 mask: '*',
                 validate: function (value: string) {
                     if (/^[0-9a-fA-F]{64}$/.test(value)) {
@@ -170,7 +178,7 @@ async function promptForPrivateKey(): Promise<string> {
             },
         ]);
         const key = enteredKey.toLowerCase();
-        console.log(chalk.green('🔐 Private key set.'));
+        console.log(chalk.green('🔐 Server private key set.'));
         return key;
     }
 }
@@ -180,7 +188,7 @@ async function promptForArcApiKey(): Promise<string | undefined> {
         {
             type: 'confirm',
             name: 'setArcKey',
-            message: 'Do you have a TAAL (ARC) API key to set? (optional)',
+            message: 'Do you have a TAAL (ARC) API key to set? (You can get one from https://taal.com/) (optional)',
             default: false
         }
     ]);
@@ -249,31 +257,45 @@ async function fundNinja(ninja: Ninja, amount: number, ninjaPriv: string) {
     console.log(chalk.green('🎉 Ninja funded!'));
 }
 
+function getCurrentNetwork(larsConfig: CARSConfig): 'mainnet' | 'testnet' {
+    return larsConfig.network === 'mainnet' ? 'mainnet' : 'testnet';
+}
+
 /////////////////////////////////////////////////////////////////////////////////////
-// Configuration and Menu Systems
+// Menus for editing config and keys
 /////////////////////////////////////////////////////////////////////////////////////
 
-// Edit local project config interactively
-async function editLocalConfig(larsConfig: LARSConfigLocal, network: 'mainnet' | 'testnet') {
-    // We'll allow toggling request logging, GASP sync, and changing keys.
-    // Also allow setting project-level overrides for keys, or revert to global keys.
+async function maybeHoistProjectKeyToGlobal(projectVal: string | undefined, globalVal: string | undefined, setter: (val: string) => void, keyType: 'serverPrivateKey' | 'taalApiKey', network: 'mainnet' | 'testnet') {
+    if (projectVal && !globalVal) {
+        const ask = await promptYesNo(`Would you like to also save this ${keyType === 'serverPrivateKey' ? 'server key' : 'TAAL API key'} to your global keys for ${network}?`);
+        if (ask) {
+            const globalKeys = loadOrInitGlobalKeys();
+            if (keyType === 'serverPrivateKey') {
+                globalKeys[network]!.serverPrivateKey = projectVal;
+            } else {
+                globalKeys[network]!.taalApiKey = projectVal;
+            }
+            saveGlobalKeys(globalKeys);
+            console.log(chalk.green('✅ Key saved globally.'));
+        }
+    }
+}
 
-    // Load global keys
+// Edit local project config interactively (keys and toggles)
+async function editLocalConfig(projectConfig: LARSConfigLocal, network: 'mainnet' | 'testnet') {
     const globalKeys = loadOrInitGlobalKeys();
+    const netKeys = projectConfig.projectKeys[network];
+    const effectiveServerKey = netKeys.serverPrivateKey || globalKeys[network]?.serverPrivateKey;
+    const effectiveArcApiKey = netKeys.arcApiKey || globalKeys[network]?.taalApiKey;
 
-    // Determine current effective serverPrivateKey and arcApiKey:
-    const effectiveServerKey = larsConfig.serverPrivateKey || globalKeys[network]?.serverPrivateKey;
-    const effectiveArcApiKey = larsConfig.arcApiKey || globalKeys[network]?.taalApiKey;
-
-    // We'll present a menu:
     let done = false;
     while (!done) {
         console.log(chalk.blue(`\nProject config menu (Network: ${network})`));
         const choices = [
-            { name: `Server private key: ${effectiveServerKey ? '(set)' : '(not set)'} (project-level: ${larsConfig.serverPrivateKey ? 'yes' : 'no'})`, value: 'serverKey' },
-            { name: `TAAL (ARC) API key: ${effectiveArcApiKey ? '(set)' : '(not set)'} (project-level: ${larsConfig.arcApiKey ? 'yes' : 'no'})`, value: 'arcKey' },
-            { name: `Request logging: ${larsConfig.enableRequestLogging ? 'enabled' : 'disabled'}`, value: 'reqlog' },
-            { name: `GASP sync: ${larsConfig.enableGASPSync ? 'enabled' : 'disabled'}`, value: 'gasp' },
+            { name: `Server private key: ${effectiveServerKey ? '(set)' : '(not set)'} (project-level: ${netKeys.serverPrivateKey ? 'yes' : 'no'})`, value: 'serverKey' },
+            { name: `TAAL (ARC) API key: ${effectiveArcApiKey ? '(set)' : '(not set)'} (project-level: ${netKeys.arcApiKey ? 'yes' : 'no'})`, value: 'arcKey' },
+            { name: `Request logging: ${projectConfig.enableRequestLogging ? 'enabled' : 'disabled'}`, value: 'reqlog' },
+            { name: `GASP sync: ${projectConfig.enableGASPSync ? 'enabled' : 'disabled'}`, value: 'gasp' },
             { name: 'Done', value: 'done' }
         ];
 
@@ -287,10 +309,10 @@ async function editLocalConfig(larsConfig: LARSConfigLocal, network: 'mainnet' |
         ]);
 
         if (action === 'serverKey') {
-            const { action: keyAction } = await inquirer.prompt([
+            const { keyAction } = await inquirer.prompt([
                 {
                     type: 'list',
-                    name: 'action',
+                    name: 'keyAction',
                     message: 'Manage server private key:',
                     choices: [
                         { name: 'Set project-level key', value: 'set' },
@@ -300,16 +322,22 @@ async function editLocalConfig(larsConfig: LARSConfigLocal, network: 'mainnet' |
                 }
             ]);
             if (keyAction === 'set') {
-                larsConfig.serverPrivateKey = await promptForPrivateKey();
+                const newKey = await promptForPrivateKey();
+                netKeys.serverPrivateKey = newKey;
+                saveProjectConfig(projectConfig);
+                await maybeHoistProjectKeyToGlobal(newKey, globalKeys[network]?.serverPrivateKey, val => {
+                    globalKeys[network]!.serverPrivateKey = val;
+                    saveGlobalKeys(globalKeys);
+                }, 'serverPrivateKey', network);
             } else if (keyAction === 'useGlobal') {
-                larsConfig.serverPrivateKey = undefined;
+                netKeys.serverPrivateKey = undefined;
+                saveProjectConfig(projectConfig);
             }
-            saveProjectConfig(larsConfig);
         } else if (action === 'arcKey') {
-            const { action: keyAction } = await inquirer.prompt([
+            const { keyAction } = await inquirer.prompt([
                 {
                     type: 'list',
-                    name: 'action',
+                    name: 'keyAction',
                     message: 'Manage TAAL (ARC) API key:',
                     choices: [
                         { name: 'Set project-level key', value: 'set' },
@@ -322,18 +350,26 @@ async function editLocalConfig(larsConfig: LARSConfigLocal, network: 'mainnet' |
             if (keyAction === 'set') {
                 const newArc = await promptForArcApiKey();
                 if (newArc) {
-                    larsConfig.arcApiKey = newArc;
+                    netKeys.arcApiKey = newArc;
+                    saveProjectConfig(projectConfig);
+                    await maybeHoistProjectKeyToGlobal(newArc, globalKeys[network]?.taalApiKey, val => {
+                        globalKeys[network]!.taalApiKey = val;
+                        saveGlobalKeys(globalKeys);
+                    }, 'taalApiKey', network);
                 }
-            } else if (keyAction === 'useGlobal' || keyAction === 'unset') {
-                larsConfig.arcApiKey = undefined;
+            } else if (keyAction === 'useGlobal') {
+                netKeys.arcApiKey = undefined;
+                saveProjectConfig(projectConfig);
+            } else if (keyAction === 'unset') {
+                netKeys.arcApiKey = undefined;
+                saveProjectConfig(projectConfig);
             }
-            saveProjectConfig(larsConfig);
         } else if (action === 'reqlog') {
-            larsConfig.enableRequestLogging = !larsConfig.enableRequestLogging;
-            saveProjectConfig(larsConfig);
+            projectConfig.enableRequestLogging = !projectConfig.enableRequestLogging;
+            saveProjectConfig(projectConfig);
         } else if (action === 'gasp') {
-            larsConfig.enableGASPSync = !larsConfig.enableGASPSync;
-            saveProjectConfig(larsConfig);
+            projectConfig.enableGASPSync = !projectConfig.enableGASPSync;
+            saveProjectConfig(projectConfig);
         } else {
             done = true;
         }
@@ -380,7 +416,60 @@ async function editGlobalKeys() {
     }
 }
 
-// Main menu
+// Edit LARS Deployment Info (e.g., change network)
+async function editLARSDeploymentInfo(info: CARSConfigInfo) {
+    let larsConfig = getLARSConfigFromDeploymentInfo(info);
+    if (!larsConfig) {
+        console.log(chalk.yellow('No LARS configuration found. Creating one.'));
+        await addLARSConfigInteractive(info);
+        larsConfig = getLARSConfigFromDeploymentInfo(info);
+    }
+    if (!larsConfig) {
+        console.error(chalk.red('Failed to create/find LARS configuration.'));
+        return;
+    }
+
+    let done = false;
+    while (!done) {
+        const currentNet = larsConfig.network === 'mainnet' ? 'mainnet' : 'testnet';
+        const choices = [
+            { name: `Change network (current: ${currentNet})`, value: 'network' },
+            { name: 'Back', value: 'back' }
+        ];
+
+        console.log(chalk.blue(`\nLARS Deployment Info Menu (current network: ${currentNet})`));
+        const { action } = await inquirer.prompt([
+            { type: 'list', name: 'action', message: 'Select an action:', choices }
+        ]);
+
+        if (action === 'network') {
+            const { newNetwork } = await inquirer.prompt([
+                {
+                    type: 'list',
+                    name: 'newNetwork',
+                    message: 'Select the new network for LARS:',
+                    choices: ['mainnet', 'testnet'],
+                    default: currentNet
+                }
+            ]);
+            if (newNetwork !== currentNet) {
+                // Update deployment-info.json
+                larsConfig.network = newNetwork;
+                fs.writeFileSync(DEPLOYMENT_INFO_PATH, JSON.stringify(info, null, 2));
+                console.log(chalk.green(`✅ LARS network changed to ${newNetwork}.`));
+            } else {
+                console.log(chalk.yellow('No change to network.'));
+            }
+        } else {
+            done = true;
+        }
+    }
+}
+
+/////////////////////////////////////////////////////////////////////////////////////
+// Main menus
+/////////////////////////////////////////////////////////////////////////////////////
+
 async function mainMenu() {
     const info = loadDeploymentInfo();
     let larsConfig = getLARSConfigFromDeploymentInfo(info);
@@ -398,14 +487,14 @@ async function mainMenu() {
         process.exit(1);
     }
 
-    // Ensure we have a network
-    const network = larsConfig.network === 'mainnet' ? 'mainnet' : 'testnet';
+    const network = getCurrentNetwork(larsConfig);
 
     let done = false;
     while (!done) {
         const choices = [
             { name: 'Edit Global Keys', value: 'globalKeys' },
-            { name: 'Edit Local Project Config', value: 'localConfig' },
+            { name: `Edit Local Project Config (${network})`, value: 'localConfig' },
+            { name: 'Edit LARS Deployment Info', value: 'editDeployment' },
             { name: 'Start LARS', value: 'start' },
             { name: 'Exit', value: 'exit' }
         ];
@@ -418,9 +507,14 @@ async function mainMenu() {
         if (action === 'globalKeys') {
             await editGlobalKeys();
         } else if (action === 'localConfig') {
-            await editLocalConfig(projectConfig, network);
+            await editLocalConfig(projectConfig, getCurrentNetwork(larsConfig!));
+        } else if (action === 'editDeployment') {
+            // Reload info in case user changed configs
+            const updatedInfo = loadDeploymentInfo();
+            await editLARSDeploymentInfo(updatedInfo);
+            larsConfig = getLARSConfigFromDeploymentInfo(updatedInfo);
         } else if (action === 'start') {
-            await startLARS(larsConfig, projectConfig);
+            await startLARS(larsConfig!, projectConfig);
         } else {
             done = true;
         }
@@ -447,6 +541,7 @@ async function addLARSConfigInteractive(info: CARSConfigInfo) {
         run: ['backend']
     };
     info.configs = info.configs || [];
+    info.configs = info.configs.filter(c => c.provider !== 'LARS'); // ensure only one LARS config
     info.configs.push(newCfg);
     fs.writeFileSync(DEPLOYMENT_INFO_PATH, JSON.stringify(info, null, 2));
     console.log(chalk.green(`✅ LARS configuration "Local LARS" created with network: ${network}.`));
@@ -462,13 +557,12 @@ async function startLARS(larsConfig: CARSConfig, projectConfig: LARSConfigLocal)
     console.log(chalk.green('Welcome to the LARS development environment! 🚀'));
     console.log(chalk.green("Let's get your local Overlay Services up and running!\n"));
 
-    // Load global keys
     const globalKeys = loadOrInitGlobalKeys();
-    const network = larsConfig.network === 'mainnet' ? 'mainnet' : 'testnet';
+    const network = getCurrentNetwork(larsConfig);
+    const netKeys = projectConfig.projectKeys[network];
 
-    // Determine final keys:
-    let finalServerKey = projectConfig.serverPrivateKey || globalKeys[network]?.serverPrivateKey;
-    let finalArcKey = projectConfig.arcApiKey || globalKeys[network]?.taalApiKey;
+    let finalServerKey = netKeys.serverPrivateKey || globalKeys[network]?.serverPrivateKey;
+    let finalArcKey = netKeys.arcApiKey || globalKeys[network]?.taalApiKey;
 
     // If no server key at all, ask user to set either global or project-level:
     if (!finalServerKey) {
@@ -482,13 +576,16 @@ async function startLARS(larsConfig: CARSConfig, projectConfig: LARSConfigLocal)
         } else {
             // set project-level
             const key = await promptForPrivateKey();
-            projectConfig.serverPrivateKey = key;
+            netKeys.serverPrivateKey = key;
             saveProjectConfig(projectConfig);
             finalServerKey = key;
+            await maybeHoistProjectKeyToGlobal(key, globalKeys[network]?.serverPrivateKey, val => {
+                globalKeys[network]!.serverPrivateKey = val;
+                saveGlobalKeys(globalKeys);
+            }, 'serverPrivateKey', network);
         }
     }
 
-    // Now finalServerKey should be set
     if (!finalServerKey) {
         console.error(chalk.red('❌ Server private key is required. Exiting.'));
         process.exit(1);
@@ -597,10 +694,16 @@ async function startLARS(larsConfig: CARSConfig, projectConfig: LARSConfigLocal)
         process.exit(1);
     }
 
-    // Generate docker-compose.yml
-    console.log(chalk.blue('\n📝 Generating docker-compose.yml...'));
-    ensureLocalDataDir();
-    const composeContent = generateDockerCompose(ngrokUrl, LOCAL_DATA_PATH, finalServerKey, enableContracts, network, finalArcKey, projectConfig.enableRequestLogging!, projectConfig.enableGASPSync!);
+    const composeContent = generateDockerCompose(
+        ngrokUrl,
+        LOCAL_DATA_PATH,
+        finalServerKey,
+        enableContracts,
+        network,
+        finalArcKey,
+        projectConfig.enableRequestLogging,
+        projectConfig.enableGASPSync
+    );
     const composeYaml = yaml.stringify(composeContent);
     const composeFilePath = path.join(LOCAL_DATA_PATH, 'docker-compose.yml');
     fs.writeFileSync(composeFilePath, composeYaml);
@@ -693,13 +796,13 @@ function generateDockerCompose(
         KNEX_URL: 'mysql://overlayAdmin:overlay123@mysql:3306/overlay',
         SERVER_PRIVATE_KEY: serverPrivateKey,
         HOSTING_URL: hostingUrl,
-        NETWORK: network
+        NETWORK: network,
+        REQUEST_LOGGING: reqLogging ? 'true' : 'false',
+        GASP_SYNC: gaspSync ? 'true' : 'false'
     };
     if (arcApiKey) {
         env.ARC_API_KEY = arcApiKey;
     }
-    env.REQUEST_LOGGING = reqLogging ? 'true' : 'false';
-    env.GASP_SYNC = gaspSync ? 'true' : 'false';
 
     const composeContent: any = {
         services: {
@@ -908,7 +1011,54 @@ exec "$@"`
 
 program
     .command('config')
-    .description('Edit LARS configuration (local project config and global keys)')
+    .description('Manage LARS configuration (global keys, local config, and deployment info)')
+    .action(async () => {
+        // Show a config-focused menu:
+        const info = loadDeploymentInfo();
+        let larsConfig = getLARSConfigFromDeploymentInfo(info);
+        if (!larsConfig) {
+            console.log(chalk.yellow('No LARS configuration found. Creating one.'));
+            await addLARSConfigInteractive(info);
+            larsConfig = getLARSConfigFromDeploymentInfo(info);
+        }
+        if (!larsConfig) {
+            console.error(chalk.red('Failed to create/find LARS configuration.'));
+            process.exit(1);
+        }
+        const projectConfig = loadProjectConfig();
+
+        let done = false;
+        while (!done) {
+            const network = getCurrentNetwork(larsConfig!);
+            const choices = [
+                { name: 'Edit Global Keys', value: 'globalKeys' },
+                { name: `Edit Local Project Config (${network})`, value: 'localConfig' },
+                { name: 'Edit LARS Deployment Info', value: 'editDeployment' },
+                { name: 'Back to main menu', value: 'back' }
+            ];
+
+            console.log(chalk.blue('\nLARS Config Menu'));
+            const { action } = await inquirer.prompt([
+                { type: 'list', name: 'action', message: 'Select an action:', choices }
+            ]);
+
+            if (action === 'globalKeys') {
+                await editGlobalKeys();
+            } else if (action === 'localConfig') {
+                await editLocalConfig(projectConfig, getCurrentNetwork(larsConfig!));
+            } else if (action === 'editDeployment') {
+                const updatedInfo = loadDeploymentInfo();
+                await editLARSDeploymentInfo(updatedInfo);
+                larsConfig = getLARSConfigFromDeploymentInfo(updatedInfo);
+            } else {
+                done = true;
+            }
+        }
+    });
+
+program
+    .command('start')
+    .description('Start LARS development environment')
     .action(async () => {
         const info = loadDeploymentInfo();
         let larsConfig = getLARSConfigFromDeploymentInfo(info);
@@ -921,31 +1071,8 @@ program
             console.error(chalk.red('Failed to create/find LARS configuration.'));
             process.exit(1);
         }
-
-        const network = larsConfig.network === 'mainnet' ? 'mainnet' : 'testnet';
         const projectConfig = loadProjectConfig();
-        // Present a menu similar to main menu but only config
-        await editGlobalKeys();
-        await editLocalConfig(projectConfig, network);
-    });
-
-program
-    .command('start')
-    .description('Start LARS development environment')
-    .action(async () => {
-        const info = loadDeploymentInfo();
-        const larsConfig = getLARSConfigFromDeploymentInfo(info);
-        if (!larsConfig) {
-            console.log(chalk.yellow('No LARS configuration found. Creating one.'));
-            await addLARSConfigInteractive(info);
-        }
-        const finalConfig = getLARSConfigFromDeploymentInfo(info);
-        if (!finalConfig) {
-            console.error(chalk.red('Failed to create/find LARS configuration.'));
-            process.exit(1);
-        }
-        const projectConfig = loadProjectConfig();
-        await startLARS(finalConfig, projectConfig);
+        await startLARS(larsConfig, projectConfig);
     });
 
 program
