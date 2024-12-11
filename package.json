@@ -8,7 +8,7 @@
         "lars": "dist/index.js"
     },
     "scripts": {
-        "build": "tsc"
+        "build": "tsc -b"
     },
     "keywords": [
         "bsv",

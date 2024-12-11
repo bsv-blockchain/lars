@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-
 import { program } from 'commander';
 import fs from 'fs-extra';
 import path from 'path';
@@ -12,9 +11,10 @@ import chokidar from 'chokidar';
 import yaml from 'yaml';
 import crypto from 'crypto';
 import ngrok from 'ngrok';
-import { Ninja } from 'ninja-base';
+import { Ninja, NinjaSubmitDirectTransactionApi, NinjaSubmitDirectTransactionParams } from 'ninja-base';
 import { getPublicKey, createAction, getVersion } from '@babbage/sdk-ts';
 import { P2PKH, PrivateKey, PublicKey } from '@bsv/sdk';
+import { verifyTruthy } from '@babbage/sdk-ts/out/src/utils/Helpers.js';
 
 /////////////////////////////////////////////////////////////////////////////////////
 // Constants and Types
@@ -231,14 +231,16 @@ async function fundNinja(ninja: Ninja, amount: number, ninjaPriv: string) {
         outputs,
         description: 'Funding Local Overlay Services host for development'
     });
-    transaction.outputs = [{
-        vout: 0,
-        satoshis: amount,
-        derivationSuffix
-    }];
-    const directTransaction = {
+    const directTransaction: NinjaSubmitDirectTransactionParams = {
         derivationPrefix,
-        transaction,
+        transaction: {
+            ...transaction,
+            outputs: [{
+                vout: 0,
+                satoshis: amount,
+                derivationSuffix
+            }]
+        } as NinjaSubmitDirectTransactionApi,
         senderIdentityKey: await getPublicKey({ identityKey: true }),
         protocol: '3241645161d8' as any,
         note: 'Incoming payment from KeyFunder'
