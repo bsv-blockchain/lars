@@ -30,7 +30,7 @@ interface CARSConfig {
     frontendHostingMethod?: string;
     authentication?: any;
     payments?: any;
-    run?: string[]; // For LARS only
+    run?: string[]; // For LARS only - which services to run e.g. ['backend'] or ['frontend'] or ['backend', 'frontend']
 }
 
 interface CARSConfigInfo {
@@ -440,6 +440,7 @@ async function editLARSDeploymentInfo(info: CARSConfigInfo) {
         const currentNet = larsConfig.network === 'mainnet' ? 'mainnet' : 'testnet';
         const choices = [
             { name: `Change network (current: ${currentNet})`, value: 'network' },
+            { name: `Edit run configuration (current: ${larsConfig.run?.join(', ') || 'none'})`, value: 'runConfig' },
             { name: 'Back', value: 'back' }
         ];
 
@@ -466,6 +467,23 @@ async function editLARSDeploymentInfo(info: CARSConfigInfo) {
             } else {
                 console.log(chalk.yellow('No change to network.'));
             }
+        } else if (action === 'runConfig') {
+            // Let user pick which services to run: backend, frontend or both
+            const currentRun = larsConfig.run || [];
+            const { newRun } = await inquirer.prompt([
+                {
+                    type: 'checkbox',
+                    name: 'newRun',
+                    message: 'Select which services to run:',
+                    choices: [
+                        { name: 'backend', value: 'backend', checked: currentRun.includes('backend') },
+                        { name: 'frontend', value: 'frontend', checked: currentRun.includes('frontend') }
+                    ]
+                }
+            ]);
+            larsConfig.run = newRun;
+            fs.writeFileSync(DEPLOYMENT_INFO_PATH, JSON.stringify(info, null, 2));
+            console.log(chalk.green(`✅ LARS run configuration updated to: ${newRun.join(', ') || 'none'}`));
         } else {
             done = true;
         }
@@ -540,17 +558,56 @@ async function addLARSConfigInteractive(info: CARSConfigInfo) {
         }
     ]);
 
+    const { runServices } = await inquirer.prompt([
+        {
+            type: 'checkbox',
+            name: 'runServices',
+            message: 'Which services should LARS run?',
+            choices: [
+                { name: 'backend', value: 'backend' },
+                { name: 'frontend', value: 'frontend' }
+            ]
+        }
+    ]);
+
     const newCfg: CARSConfig = {
         name: 'Local LARS',
         network,
         provider: 'LARS',
-        run: ['backend']
+        run: runServices
     };
     info.configs = info.configs || [];
     info.configs = info.configs.filter(c => c.provider !== 'LARS'); // ensure only one LARS config
     info.configs.push(newCfg);
     fs.writeFileSync(DEPLOYMENT_INFO_PATH, JSON.stringify(info, null, 2));
-    console.log(chalk.green(`✅ LARS configuration "Local LARS" created with network: ${network}.`));
+    console.log(chalk.green(`✅ LARS configuration "Local LARS" created with network: ${network}, running: ${runServices.join(', ')}`));
+}
+
+// Auto-install frontend dependencies if needed
+async function ensureFrontendDependencies(info: CARSConfigInfo) {
+    if (!info.frontend || !info.frontend.language) return; // no frontend
+    const frontendDir = path.resolve(PROJECT_ROOT, info.frontend.sourceDirectory || 'frontend');
+    if (!fs.existsSync(frontendDir)) {
+        console.log(chalk.red(`❌ Frontend directory not found at ${frontendDir}.`));
+        return;
+    }
+
+    const packageJsonPath = path.join(frontendDir, 'package.json');
+    if (!fs.existsSync(packageJsonPath)) {
+        // If no package.json and the language is html or static, just serve it directly.
+        return;
+    }
+
+    const nodeModulesPath = path.join(frontendDir, 'node_modules');
+    if (!fs.existsSync(nodeModulesPath)) {
+        console.log(chalk.blue(`📦 Installing frontend dependencies at ${frontendDir}...`));
+        try {
+            execSync('npm install', { cwd: frontendDir, stdio: 'inherit' });
+            console.log(chalk.green(`✅ Frontend dependencies installed.`));
+        } catch (err) {
+            console.error(chalk.red(`❌ Failed to install frontend dependencies.`));
+        }
+    }
 }
 
 // Start LARS
@@ -704,8 +761,11 @@ async function startLARS(larsConfig: CARSConfig, projectConfig: LARSConfigLocal)
         process.exit(1);
     }
 
-    // Ensure local data dir and write docker-compose.yml
+    // Ensure local data dir and write docker-compose.yml (backend only if backend is selected)
     ensureLocalDataDir();
+    const runBackend = larsConfig.run?.includes('backend');
+    const runFrontend = larsConfig.run?.includes('frontend');
+
     const composeContent = generateDockerCompose(
         ngrokUrl,
         LOCAL_DATA_PATH,
@@ -714,79 +774,182 @@ async function startLARS(larsConfig: CARSConfig, projectConfig: LARSConfigLocal)
         network,
         finalArcKey,
         projectConfig.enableRequestLogging,
-        projectConfig.enableGASPSync
+        projectConfig.enableGASPSync,
+        runBackend
     );
     const composeYaml = yaml.stringify(composeContent);
     const composeFilePath = path.join(LOCAL_DATA_PATH, 'docker-compose.yml');
     fs.writeFileSync(composeFilePath, composeYaml);
     console.log(chalk.green('✅ docker-compose.yml generated.'));
 
-    // Generate overlay-dev-container files
-    console.log(chalk.blue('\n📁 Generating overlay-dev-container files...'));
-    const overlayDevContainerPath = path.join(LOCAL_DATA_PATH, 'overlay-dev-container');
-    fs.ensureDirSync(overlayDevContainerPath);
+    if (runBackend) {
+        // Generate overlay-dev-container files
+        console.log(chalk.blue('\n📁 Generating overlay-dev-container files...'));
+        const overlayDevContainerPath = path.join(LOCAL_DATA_PATH, 'overlay-dev-container');
+        fs.ensureDirSync(overlayDevContainerPath);
 
-    const indexTsContent = generateIndexTs(info, projectConfig, finalArcKey, network);
-    fs.writeFileSync(path.join(overlayDevContainerPath, 'index.ts'), indexTsContent);
+        const indexTsContent = generateIndexTs(info, projectConfig, finalArcKey, network);
+        fs.writeFileSync(path.join(overlayDevContainerPath, 'index.ts'), indexTsContent);
 
-    // Read backend dependencies if available
-    const backendPackageJsonPath = path.resolve(PROJECT_ROOT, 'backend', 'package.json');
-    let backendDependencies: Record<string, string> = {};
-    if (fs.existsSync(backendPackageJsonPath)) {
-        const backendPackageJson = JSON.parse(fs.readFileSync(backendPackageJsonPath, 'utf-8'));
-        backendDependencies = backendPackageJson.dependencies || {};
-    } else {
-        console.warn(chalk.yellow('⚠️  No backend/package.json found.'));
+        // Read backend dependencies if available
+        const backendPackageJsonPath = path.resolve(PROJECT_ROOT, 'backend', 'package.json');
+        let backendDependencies: Record<string, string> = {};
+        if (fs.existsSync(backendPackageJsonPath)) {
+            const backendPackageJson = JSON.parse(fs.readFileSync(backendPackageJsonPath, 'utf-8'));
+            backendDependencies = backendPackageJson.dependencies || {};
+        } else {
+            console.warn(chalk.yellow('⚠️  No backend/package.json found.'));
+        }
+
+        const packageJsonContent = generatePackageJson(backendDependencies);
+        fs.writeFileSync(path.join(overlayDevContainerPath, 'package.json'), JSON.stringify(packageJsonContent, null, 2));
+        fs.writeFileSync(path.join(overlayDevContainerPath, 'tsconfig.json'), generateTsConfig());
+        fs.writeFileSync(path.join(overlayDevContainerPath, 'wait-for-services.sh'), generateWaitScript());
+        fs.writeFileSync(path.join(overlayDevContainerPath, 'Dockerfile'), generateDockerfile(enableContracts));
+        console.log(chalk.green('✅ overlay-dev-container files generated.'));
+
+        // Set up file watchers for backend
+        console.log(chalk.blue('\n👀 Setting up backend file watchers...'));
+        const backendSrcPath = path.resolve(PROJECT_ROOT, 'backend', 'src');
+        const watcher = chokidar.watch(backendSrcPath, { ignoreInitial: true });
+        watcher.on('all', (event, filePath) => {
+            console.log(chalk.yellow(`🔄 File ${event}: ${filePath}`));
+            if (filePath.includes(path.join('backend', 'src', 'contracts')) && enableContracts) {
+                console.log(chalk.blue('🔨 Changes detected in contracts directory. Running npm run compile...'));
+                const compileProcess = spawn('npm', ['run', 'compile'], {
+                    cwd: path.resolve(PROJECT_ROOT, 'backend'),
+                    stdio: 'inherit'
+                });
+
+                compileProcess.on('exit', (code) => {
+                    if (code === 0) {
+                        console.log(chalk.green('✅ Contract compilation completed.'));
+                    } else {
+                        console.error(chalk.red(`❌ Contract compilation failed with exit code ${code}.`));
+                    }
+                });
+            }
+        });
     }
 
-    const packageJsonContent = generatePackageJson(backendDependencies);
-    fs.writeFileSync(path.join(overlayDevContainerPath, 'package.json'), JSON.stringify(packageJsonContent, null, 2));
-    fs.writeFileSync(path.join(overlayDevContainerPath, 'tsconfig.json'), generateTsConfig());
-    fs.writeFileSync(path.join(overlayDevContainerPath, 'wait-for-services.sh'), generateWaitScript());
-    fs.writeFileSync(path.join(overlayDevContainerPath, 'Dockerfile'), generateDockerfile(enableContracts));
-    console.log(chalk.green('✅ overlay-dev-container files generated.'));
+    // Start backend containers if selected
+    let backendProcess: any;
+    if (runBackend) {
+        console.log(chalk.blue('\n🐳 Starting Backend Docker Compose...'));
+        backendProcess = spawn('docker', ['compose', 'up', '--build'], {
+            cwd: LOCAL_DATA_PATH,
+            stdio: 'inherit'
+        });
+    }
 
-    // Start Docker Compose
-    console.log(chalk.blue('\n🐳 Starting Docker Compose...'));
-    const dockerComposeUp = spawn('docker', ['compose', 'up', '--build'], {
-        cwd: LOCAL_DATA_PATH,
-        stdio: 'inherit'
-    });
+    if (runFrontend) {
+        // Ensure frontend dependencies
+        await ensureFrontendDependencies(info);
 
-    dockerComposeUp.on('exit', (code) => {
-        if (code === 0) {
-            console.log(chalk.green(`🐳 Docker Compose going down.`));
-        } else {
-            console.log(chalk.red(`❌ Docker Compose exited with code ${code}`));
+        // Wait for backend if backend is included (to ensure services are up), otherwise proceed immediately
+        if (runBackend) {
+            console.log(chalk.blue('⏳ Waiting for backend services to be ready before starting frontend...'));
+            await waitForBackendServices();
         }
-        console.log(chalk.blue(`👋 LARS will see you next time!`));
-        process.exit(0);
-    });
 
-    // Set up file watchers
-    console.log(chalk.blue('\n👀 Setting up file watchers...'));
-    const backendSrcPath = path.resolve(PROJECT_ROOT, 'backend', 'src');
-    const watcher = chokidar.watch(backendSrcPath, { ignoreInitial: true });
-    watcher.on('all', (event, filePath) => {
-        console.log(chalk.yellow(`🔄 File ${event}: ${filePath}`));
-        if (filePath.includes(path.join('backend', 'src', 'contracts')) && enableContracts) {
-            console.log(chalk.blue('🔨 Changes detected in contracts directory. Running npm run compile...'));
-            const compileProcess = spawn('npm', ['run', 'compile'], {
-                cwd: path.resolve(PROJECT_ROOT, 'backend'),
-                stdio: 'inherit'
-            });
+        // Start frontend
+        await startFrontend(info);
+    }
 
-            compileProcess.on('exit', (code) => {
-                if (code === 0) {
-                    console.log(chalk.green('✅ Contract compilation completed.'));
-                } else {
-                    console.error(chalk.red(`❌ Contract compilation failed with exit code ${code}.`));
-                }
-            });
+    if (runBackend && backendProcess) {
+        backendProcess.on('exit', (code: number) => {
+            if (code === 0) {
+                console.log(chalk.green(`🐳 Backend services going down.`));
+            } else {
+                console.log(chalk.red(`❌ Backend services exited with code ${code}`));
+            }
+            console.log(chalk.blue(`👋 LARS will see you next time!`));
+            process.exit(0);
+        });
+    } else {
+        console.log(chalk.green('\n🎉 LARS development environment is ready! Happy hacking!'));
+    }
+}
+
+// Wait for backend services to be ready
+async function waitForBackendServices() {
+    // A simple check: we know backend runs on 8080 from Docker.
+    // We'll just poll the endpoint until it responds or timeout after some time.
+    const maxAttempts = 30;
+    const waitTime = 2000; // ms
+    const url = 'http://localhost:8080';
+    const axios = (await import('axios')).default;
+
+    console.log(chalk.blue('🔍 Checking backend health endpoint...'));
+    for (let i = 0; i < maxAttempts; i++) {
+        try {
+            await axios.get(url);
+            console.log(chalk.green('✅ Backend is ready!'));
+            return;
+        } catch {
+            process.stdout.write('.');
+            await new Promise(res => setTimeout(res, waitTime));
         }
-    });
+    }
+    console.log(chalk.red(`❌ Backend did not become ready after ${maxAttempts * waitTime / 1000} seconds.`));
+}
 
-    console.log(chalk.green('\n🎉 LARS development environment is up and running! Happy coding!'));
+// Starting frontend logic
+async function startFrontend(info: CARSConfigInfo) {
+    if (!info.frontend || !info.frontend.language) {
+        console.log(chalk.yellow('⚠️ No frontend configuration found, skipping frontend startup.'));
+        return;
+    }
+
+    const frontendDir = path.resolve(PROJECT_ROOT, info.frontend.sourceDirectory || 'frontend');
+    if (!fs.existsSync(frontendDir)) {
+        console.log(chalk.red(`❌ Frontend directory not found at ${frontendDir}, skipping.`));
+        return;
+    }
+
+    const { language } = info.frontend;
+    if (language === 'react') {
+        console.log(chalk.blue('🎨 Starting React frontend...'));
+        // Start `npm run start` in frontendDir
+        const frontendProcess = spawn('npm', ['run', 'start'], {
+            cwd: frontendDir,
+            stdio: 'inherit'
+        });
+        frontendProcess.on('exit', (code: number) => {
+            if (code === 0) {
+                console.log(chalk.green(`🎨 React frontend stopped.`));
+            } else {
+                console.log(chalk.red(`❌ React frontend exited with code ${code}.`));
+            }
+        });
+    } else if (language === 'html') {
+        console.log(chalk.blue('🎨 Starting static HTML frontend...'));
+        // Check if 'serve' is installed globally, if not install it
+        try {
+            execSync('serve -v', { stdio: 'ignore' });
+        } catch {
+            console.log(chalk.blue('📦 Installing "serve" globally...'));
+            try {
+                execSync('npm install -g serve', { stdio: 'inherit' });
+            } catch (err) {
+                console.error(chalk.red(`❌ Failed to install "serve" globally.`));
+                return;
+            }
+        }
+        const serveProcess = spawn('serve', ['-l', '3000', '.'], {
+            cwd: frontendDir,
+            stdio: 'inherit'
+        });
+        serveProcess.on('exit', (code: number) => {
+            if (code === 0) {
+                console.log(chalk.green(`🎨 Static HTML frontend stopped.`));
+            } else {
+                console.log(chalk.red(`❌ Static HTML frontend exited with code ${code}`));
+            }
+        });
+    } else {
+        console.log(chalk.red(`❌ Frontend language ${language} not supported.`));
+    }
 }
 
 /////////////////////////////////////////////////////////////////////////////////////
@@ -801,7 +964,8 @@ function generateDockerCompose(
     network: 'mainnet' | 'testnet',
     arcApiKey: string | undefined,
     reqLogging: boolean,
-    gaspSync: boolean
+    gaspSync: boolean,
+    runBackend: boolean
 ) {
     const env: Record<string, string> = {
         MONGO_URL: 'mongodb://mongo:27017/overlay-db',
@@ -816,65 +980,69 @@ function generateDockerCompose(
         env.ARC_API_KEY = arcApiKey;
     }
 
-    const composeContent: any = {
-        services: {
-            'overlay-dev-container': {
-                build: {
-                    context: '..',
-                    dockerfile: './local-data/overlay-dev-container/Dockerfile'
-                },
-                container_name: 'overlay-dev-container',
-                restart: 'always',
-                ports: [
-                    '8080:8080'
-                ],
-                environment: env,
-                depends_on: [
-                    'mysql',
-                    'mongo'
-                ],
-                volumes: [
-                    `${path.resolve(PROJECT_ROOT, 'backend', 'src')}:/app/src`
-                ]
+    const services: any = {};
+    // If we're running backend:
+    if (runBackend) {
+        services['overlay-dev-container'] = {
+            build: {
+                context: '..',
+                dockerfile: './local-data/overlay-dev-container/Dockerfile'
             },
-            mysql: {
-                image: 'mysql:8.0',
-                container_name: 'overlay-mysql',
-                environment: {
-                    MYSQL_DATABASE: 'overlay',
-                    MYSQL_USER: 'overlayAdmin',
-                    MYSQL_PASSWORD: 'overlay123',
-                    MYSQL_ROOT_PASSWORD: 'rootpassword'
-                },
-                ports: [
-                    '3306:3306'
-                ],
-                volumes: [
-                    `${path.resolve(localDataPath, 'mysql')}:/var/lib/mysql`
-                ],
-                healthcheck: {
-                    test: ['CMD', 'mysqladmin', 'ping', '-h', 'localhost'],
-                    interval: '10s',
-                    timeout: '5s',
-                    retries: 3
-                }
-            },
-            mongo: {
-                image: 'mongo:6.0',
-                container_name: 'overlay-mongo',
-                ports: [
-                    '27017:27017'
-                ],
-                volumes: [
-                    `${path.resolve(localDataPath, 'mongo')}:/data/db`
-                ],
-                command: ["mongod", "--quiet"]
-            }
+            container_name: 'overlay-dev-container',
+            restart: 'always',
+            ports: [
+                '8080:8080'
+            ],
+            environment: env,
+            depends_on: [
+                'mysql',
+                'mongo'
+            ],
+            volumes: [
+                `${path.resolve(PROJECT_ROOT, 'backend', 'src')}:/app/src`
+            ]
+        };
+
+        if (enableContracts) {
+            services['overlay-dev-container'].volumes.push(`${path.resolve(PROJECT_ROOT, 'backend', 'artifacts')}:/app/artifacts`);
         }
-    };
-    if (enableContracts) {
-        composeContent.services['overlay-dev-container'].volumes.push(`${path.resolve(PROJECT_ROOT, 'backend', 'artifacts')}:/app/artifacts`);
+
+        services['mysql'] = {
+            image: 'mysql:8.0',
+            container_name: 'overlay-mysql',
+            environment: {
+                MYSQL_DATABASE: 'overlay',
+                MYSQL_USER: 'overlayAdmin',
+                MYSQL_PASSWORD: 'overlay123',
+                MYSQL_ROOT_PASSWORD: 'rootpassword'
+            },
+            ports: [
+                '3306:3306'
+            ],
+            volumes: [
+                `${path.resolve(localDataPath, 'mysql')}:/var/lib/mysql`
+            ],
+            healthcheck: {
+                test: ['CMD', 'mysqladmin', 'ping', '-h', 'localhost'],
+                interval: '10s',
+                timeout: '5s',
+                retries: 3
+            }
+        };
+
+        services['mongo'] = {
+            image: 'mongo:6.0',
+            container_name: 'overlay-mongo',
+            ports: [
+                '27017:27017'
+            ],
+            volumes: [
+                `${path.resolve(localDataPath, 'mongo')}:/data/db`
+            ],
+            command: ["mongod", "--quiet"]
+        };
     }
+    const composeContent: any = { services };
     return composeContent;
 }
 
