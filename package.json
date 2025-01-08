@@ -1,6 +1,6 @@
 {
     "name": "@bsv/lars",
-    "version": "1.0.9",
+    "version": "1.0.10",
     "description": "Local Automated Runtime System for BSV application development",
     "main": "dist/index.js",
     "type": "module",
