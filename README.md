@@ -17,10 +17,10 @@ LARS is designed to make local development as frictionless as possible, guiding 
 
 ## Key Features
 
-- **Interactive Menus**: Running `lars` with no arguments launches interactive menus for configuring global keys, project-level settings, and environment details.
+- **Interactive Menus**: Running `lars` with no arguments launches interactive menus for configuring global keys, project configs, deployment info, or starting your local environment.
 - **Separation of Keys by Network**: Maintain distinct keys (server private keys, TAAL API keys) for mainnet and testnet, both globally and at the project level.
 - **Automatic Environment Setup**: LARS creates a local Docker-based environment for your backend, including `overlay-express`, MySQL, and MongoDB.
-- **Frontend Integration**: If configured, LARS can also run your frontend (e.g., React). It automatically installs missing dependencies and starts the frontend. If you're running both backend and frontend, LARS waits until backend services are ready before starting the frontend.
+- **Frontend Integration**: If configured, LARS can also run your frontend (e.g., React). It automatically installs missing dependencies and starts the frontend. If you're running both backend and frontend, LARS waits until the backend is ready before starting the frontend.
 - **ngrok Integration**: Securely expose your local environment to the internet for testing or external integration.
 - **Hot Reloading & Real-Time Feedback**: Watches code changes, recompiles sCrypt contracts, and provides immediate feedback in the terminal.
 - **Smooth Transition from Local to Cloud**: LARS mirrors the structure and concepts of CARS, making it easy to move from local development (LARS) to production deployment (CARS).
@@ -133,6 +133,22 @@ Go to "Edit LARS Deployment Info" and select "Change network." LARS updates `dep
 ### 6. Funding Your Server Key (Optional)
 
 If your server key’s Ninja wallet balance is low, LARS offers automatic funding via MetaNet Client or instructions for manual funding. Keep at least 10,000 satoshis for stable local operation.
+
+### 7. Advanced Overlay Configuration & Admin Tools
+
+LARS now supports **advanced engine configuration** for `@bsv/overlay-express`. Through the “Advanced Overlay Engine Config” menu, you can:
+
+- **Set an admin Bearer token** (`adminToken`) so that you can make use of secured routes like GASP sync or advertisement sync.
+- **Control SPV broadcast behavior** via `throwOnBroadcastFailure`.
+- **Enable or disable logging timers** (`logTime`) and set a custom `logPrefix`.
+- **Fine-tune sync configuration** for each topic through `syncConfiguration`, specifying endpoints, disabling sync (`false`), or using `'SHIP'` for global peer discovery.
+
+Additionally, the **Admin Tools Menu** lets you invoke the admin-protected routes on your local OverlayExpress instance:
+
+- **Sync Advertisements**: Calls `/admin/syncAdvertisements` to ensure local ads match your configured topics and services.
+- **Start GASP Sync**: Calls `/admin/startGASPSync` to trigger a manual GASP synchronization.
+
+If you set a custom `adminToken`, LARS will use it for these admin route calls; otherwise, you’ll be prompted to enter one on demand if your server has auto-generated a random token at runtime. Setting a custom one in your config is usually the best bet.
 
 ## Project Structure
 
