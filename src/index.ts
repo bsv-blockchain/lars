@@ -12,10 +12,8 @@ import yaml from 'yaml'
 import crypto from 'crypto'
 import ngrok from 'ngrok'
 import axios from 'axios'
-import { Ninja, NinjaSubmitDirectTransactionApi, NinjaSubmitDirectTransactionParams } from 'ninja-base'
-import { getPublicKey, createAction, getVersion, getNetwork } from '@babbage/sdk-ts'
-import { P2PKH, PrivateKey, PublicKey } from '@bsv/sdk'
-import { Mode, WriteFileOptions } from 'fs'
+import { InternalizeActionArgs, KeyDeriver, P2PKH, PrivateKey, PublicKey, WalletClient, WalletInterface } from '@bsv/sdk'
+import { Services, StorageClient, Wallet, WalletSigner, WalletStorageManager } from '@bsv/wallet-toolbox-client'
 
 /// //////////////////////////////////////////////////////////////////////////////////
 // Constants and Types
@@ -243,44 +241,64 @@ async function promptYesNo(message: string, defaultVal = true): Promise<boolean>
     return answer
 }
 
-async function fundNinja(ninja: Ninja, amount: number, ninjaPriv: string, network: 'mainnet' | 'testnet') {
-    const babbageNet = await getNetwork()
-    if (network !== babbageNet) {
-        console.warn(chalk.red(`The currently-running MetaNet Client is on ${babbageNet} but LARS is configured for ${network}, therefore funding is impossible.`))
+async function makeWallet(chain: 'test' | 'main', privateKey: string): Promise<WalletInterface> {
+    const keyDeriver = new KeyDeriver(new PrivateKey(privateKey, 'hex'));
+    const storageManager = new WalletStorageManager(keyDeriver.identityKey);
+    const signer = new WalletSigner(chain, keyDeriver, storageManager);
+    const services = new Services(chain);
+    const wallet = new Wallet(signer, services);
+    const client = new StorageClient(
+        wallet,
+        // Hard-code storage URLs for now, but this should be configurable in the future along with the private key.
+        chain === 'test' ? 'https://staging-storage.babbage.systems' : 'https://storage.babbage.systems'
+    );
+    await client.makeAvailable();
+    await storageManager.addWalletStorageProvider(client);
+    return wallet;
+}
+
+async function fundWallet(wallet: WalletInterface, amount: number, walletPrivateKey: string, network: 'mainnet' | 'testnet') {
+    const localWallet = new WalletClient('auto', 'localhost')
+    const { network: localNet } = await localWallet.getNetwork()
+    if (network !== localNet) {
+        console.warn(chalk.red(`The currently-running MetaNet Client is on ${localNet} but LARS is configured for ${network}, therefore funding is impossible.`))
         return
     }
     const derivationPrefix = crypto.randomBytes(10).toString('base64')
     const derivationSuffix = crypto.randomBytes(10).toString('base64')
-    const derivedPublicKey = await getPublicKey({
-        counterparty: new PrivateKey(ninjaPriv, 'hex').toPublicKey().toString(),
-        protocolID: '3241645161d8',
+    const { publicKey: payer } = await localWallet.getPublicKey({ identityKey: true })
+    const payee = new PrivateKey(walletPrivateKey, 'hex').toPublicKey().toString()
+    const { publicKey: derivedPublicKey } = await localWallet.getPublicKey({
+        counterparty: payee,
+        protocolID: [2, '3241645161d8'],
         keyID: `${derivationPrefix} ${derivationSuffix}`
     })
-    const script = new P2PKH().lock(PublicKey.fromString(derivedPublicKey).toAddress()).toHex()
+    const lockingScript = new P2PKH().lock(PublicKey.fromString(derivedPublicKey).toAddress()).toHex()
     const outputs = [{
-        script,
-        satoshis: amount
+        lockingScript,
+        customInstructions: JSON.stringify({ derivationPrefix, derivationSuffix, payee }),
+        satoshis: amount,
+        outputDescription: 'Fund LARS for local dev'
     }]
-    const transaction = await createAction({
+    const transaction = await localWallet.createAction({
         outputs,
-        description: 'Funding Local Overlay Services host for development'
+        description: 'Funding LARS for development'
     })
-    const directTransaction: NinjaSubmitDirectTransactionParams = {
-        derivationPrefix,
-        transaction: {
-            ...transaction,
-            outputs: [{
-                vout: 0,
-                satoshis: amount,
-                derivationSuffix
-            }]
-        } as NinjaSubmitDirectTransactionApi,
-        senderIdentityKey: await getPublicKey({ identityKey: true }),
-        protocol: '3241645161d8' as any,
-        note: 'Incoming payment from KeyFunder'
+    const directTransaction: InternalizeActionArgs = {
+        tx: transaction.tx,
+        outputs: [{
+            outputIndex: 0,
+            protocol: 'wallet payment',
+            paymentRemittance: {
+                derivationPrefix,
+                derivationSuffix,
+                senderIdentityKey: payer
+            }
+        }],
+        description: 'Incoming LARS funding payment from local wallet'
     }
-    await ninja.submitDirectTransaction(directTransaction)
-    console.log(chalk.green('🎉 Ninja funded!'))
+    await wallet.internalizeAction(directTransaction)
+    console.log(chalk.green('🎉 LARS Wallet funded!'))
 }
 
 function getCurrentNetwork(larsConfig: CARSConfig): 'mainnet' | 'testnet' {
@@ -1051,25 +1069,20 @@ async function startLARS(larsConfig: CARSConfig, projectConfig: LARSConfigLocal)
         process.exit(1)
     }
     // MetaNet Client
+    const localWallet = new WalletClient('auto', 'localhost')
     try {
-        await getVersion()
+        const { version } = await localWallet.getVersion()
+        console.log(chalk.blue(`💰 Using local wallet version: ${version}`))
     } catch (err) {
         console.error(chalk.red('❌ MetaNet Client is not installed or not running.'))
         console.log(chalk.blue('👉 Download MetaNet Client: https://projectbabbage.com/'))
         process.exit(1)
     }
 
-    if (network === 'testnet') {
-        console.error(
-            chalk.red(
-                '❌❌❌❌❌ Network = testnet is almost certainly broken until Q2 2025, please strongly consider using mainnet for now.'
-            )
-        )
-    }
-
     // Check server funding
-    const ninja = new Ninja({ privateKey: finalServerKey })
-    const { total: balance } = await ninja.getTotalValue()
+    const wallet = await makeWallet(network === 'testnet' ? 'test' : 'main', finalServerKey);
+    const { outputs: outputsInDefaultBasket } = await wallet.listOutputs({ basket: 'default', limit: 10000 });
+    const balance = outputsInDefaultBasket.reduce((a, e) => a + e.satoshis, 0);
     if (balance < 10000) {
         console.log(chalk.red(`⚠️  Your server's balance is low: ${balance} satoshis.`))
         const { action } = await inquirer.prompt([
@@ -1099,12 +1112,12 @@ async function startLARS(larsConfig: CARSConfig, projectConfig: LARSConfigLocal)
                     filter: Number
                 }
             ])
-            await fundNinja(ninja, amountToFund, finalServerKey, network)
+            await fundWallet(wallet, amountToFund, finalServerKey, network)
             console.log(chalk.green(`🎉 Server funded with ${amountToFund} satoshis.`))
         } else if (action.startsWith('📝')) {
             console.log(chalk.blue('\nManual Funding Instructions:'))
             console.log('1. Use KeyFunder to fund your server.')
-            console.log(`2. Your server's Ninja private key is: ${finalServerKey}`)
+            console.log(`2. Your server's wallet private key is: ${finalServerKey}`)
             console.log('3. Visit https://keyfunder.babbage.systems and follow the instructions.')
             await inquirer.prompt([
                 {
@@ -1535,7 +1548,7 @@ function generatePackageJson(backendDependencies: Record<string, string>) {
         license: 'ISC',
         dependencies: {
             ...backendDependencies,
-            '@bsv/overlay-express': '^0.2.0',
+            '@bsv/overlay-express': '^0.3.0',
             mysql2: '^3.11.5',
             tsx: '^4.19.2'
         },
