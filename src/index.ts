@@ -282,7 +282,10 @@ async function fundWallet(wallet: WalletInterface, amount: number, walletPrivate
     }]
     const transaction = await localWallet.createAction({
         outputs,
-        description: 'Funding LARS for development'
+        description: 'Funding LARS for development',
+        options: {
+            randomizeOutputs: false
+        }
     })
     const directTransaction: InternalizeActionArgs = {
         tx: transaction.tx,
