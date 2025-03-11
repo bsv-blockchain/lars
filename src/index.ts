@@ -6,7 +6,7 @@ import os from 'os'
 import chalk from 'chalk'
 import inquirer from 'inquirer'
 import figlet from 'figlet'
-import { spawn, execSync } from 'child_process'
+import { spawn, execSync, ChildProcess } from 'child_process'
 import chokidar from 'chokidar'
 import yaml from 'yaml'
 import crypto from 'crypto'
@@ -14,6 +14,7 @@ import ngrok from 'ngrok'
 import axios from 'axios'
 import { InternalizeActionArgs, KeyDeriver, P2PKH, PrivateKey, PublicKey, WalletClient, WalletInterface } from '@bsv/sdk'
 import { Services, StorageClient, Wallet, WalletSigner, WalletStorageManager } from '@bsv/wallet-toolbox-client'
+import open from 'open'
 
 /// //////////////////////////////////////////////////////////////////////////////////
 // Constants and Types
@@ -36,9 +37,9 @@ interface CARSConfigInfo {
     schema: string
     schemaVersion: string
     topicManagers?: Record<string, string>
-    lookupServices?: Record<string, { serviceFactory: string, hydrateWith?: string }>
-    frontend?: { language: string, sourceDirectory: string }
-    contracts?: { language: string, baseDirectory: string }
+    lookupServices?: Record<string, { serviceFactory: string; hydrateWith?: string }>
+    frontend?: { language: string; sourceDirectory: string }
+    contracts?: { language: string; baseDirectory: string }
     configs?: CARSConfig[]
 }
 
@@ -129,8 +130,7 @@ function loadDeploymentInfo(): CARSConfigInfo {
 
 function getLARSConfigFromDeploymentInfo(info: CARSConfigInfo): CARSConfig | undefined {
     // Find the LARS config (provider === 'LARS')
-    const larsConfig = info.configs?.find(c => c.provider === 'LARS')
-    return larsConfig
+    return info.configs?.find(c => c.provider === 'LARS')
 }
 
 function ensureLocalDataDir() {
@@ -242,26 +242,38 @@ async function promptYesNo(message: string, defaultVal = true): Promise<boolean>
 }
 
 async function makeWallet(chain: 'test' | 'main', privateKey: string): Promise<WalletInterface> {
-    const keyDeriver = new KeyDeriver(new PrivateKey(privateKey, 'hex'));
-    const storageManager = new WalletStorageManager(keyDeriver.identityKey);
-    const signer = new WalletSigner(chain, keyDeriver, storageManager);
-    const services = new Services(chain);
-    const wallet = new Wallet(signer, services);
+    const keyDeriver = new KeyDeriver(new PrivateKey(privateKey, 'hex'))
+    const storageManager = new WalletStorageManager(keyDeriver.identityKey)
+    const signer = new WalletSigner(chain, keyDeriver, storageManager)
+    const services = new Services(chain)
+    const wallet = new Wallet(signer, services)
     const client = new StorageClient(
         wallet,
         // Hard-code storage URLs for now, but this should be configurable in the future along with the private key.
         chain === 'test' ? 'https://staging-storage.babbage.systems' : 'https://storage.babbage.systems'
-    );
-    await client.makeAvailable();
-    await storageManager.addWalletStorageProvider(client);
-    return wallet;
+    )
+    await client.makeAvailable()
+    await storageManager.addWalletStorageProvider(client)
+    return wallet
 }
 
 async function fundWallet(wallet: WalletInterface, amount: number, walletPrivateKey: string, network: 'mainnet' | 'testnet') {
     const localWallet = new WalletClient('auto', 'localhost')
+    try {
+        const { version } = await localWallet.getVersion()
+        console.log(chalk.blue(`💰 Using local wallet version: ${version}`))
+    } catch (err) {
+        console.error(chalk.red('❌ MetaNet Client is not installed or not running.'))
+        console.log(chalk.blue('👉 Download MetaNet Client: https://projectbabbage.com/'))
+        process.exit(1)
+    }
     const { network: localNet } = await localWallet.getNetwork()
     if (network !== localNet) {
-        console.warn(chalk.red(`The currently-running MetaNet Client is on ${localNet} but LARS is configured for ${network}, therefore funding is impossible.`))
+        console.warn(
+            chalk.red(
+                `The currently-running MetaNet Client is on ${localNet} but LARS is configured for ${network}. Funding from local wallet is impossible.`
+            )
+        )
         return
     }
     const derivationPrefix = crypto.randomBytes(10).toString('base64')
@@ -273,13 +285,17 @@ async function fundWallet(wallet: WalletInterface, amount: number, walletPrivate
         protocolID: [2, '3241645161d8'],
         keyID: `${derivationPrefix} ${derivationSuffix}`
     })
-    const lockingScript = new P2PKH().lock(PublicKey.fromString(derivedPublicKey).toAddress()).toHex()
-    const outputs = [{
-        lockingScript,
-        customInstructions: JSON.stringify({ derivationPrefix, derivationSuffix, payee }),
-        satoshis: amount,
-        outputDescription: 'Fund LARS for local dev'
-    }]
+    const lockingScript = new P2PKH()
+        .lock(PublicKey.fromString(derivedPublicKey).toAddress())
+        .toHex()
+    const outputs = [
+        {
+            lockingScript,
+            customInstructions: JSON.stringify({ derivationPrefix, derivationSuffix, payee }),
+            satoshis: amount,
+            outputDescription: 'Fund LARS for local dev'
+        }
+    ]
     const transaction = await localWallet.createAction({
         outputs,
         description: 'Funding LARS for development',
@@ -289,15 +305,17 @@ async function fundWallet(wallet: WalletInterface, amount: number, walletPrivate
     })
     const directTransaction: InternalizeActionArgs = {
         tx: transaction.tx,
-        outputs: [{
-            outputIndex: 0,
-            protocol: 'wallet payment',
-            paymentRemittance: {
-                derivationPrefix,
-                derivationSuffix,
-                senderIdentityKey: payer
+        outputs: [
+            {
+                outputIndex: 0,
+                protocol: 'wallet payment',
+                paymentRemittance: {
+                    derivationPrefix,
+                    derivationSuffix,
+                    senderIdentityKey: payer
+                }
             }
-        }],
+        ],
         description: 'Incoming LARS funding payment from local wallet'
     }
     await wallet.internalizeAction(directTransaction)
@@ -320,7 +338,10 @@ async function maybeHoistProjectKeyToGlobal(
     network: 'mainnet' | 'testnet'
 ) {
     if (projectVal && !globalVal) {
-        const ask = await promptYesNo(`Would you like to also save this ${keyType === 'serverPrivateKey' ? 'server key' : 'TAAL API key'} to your global keys for ${network}?`)
+        const ask = await promptYesNo(
+            `Would you like to also save this ${keyType === 'serverPrivateKey' ? 'server key' : 'TAAL API key'
+            } to your global keys for ${network}?`
+        )
         if (ask) {
             const globalKeys = loadOrInitGlobalKeys()
             if (keyType === 'serverPrivateKey') {
@@ -356,8 +377,7 @@ async function editLocalConfig(projectConfig: LARSConfigLocal, network: 'mainnet
                 value: 'arcKey'
             },
             {
-                name: `Request logging: ${projectConfig.enableRequestLogging ? 'enabled' : 'disabled'
-                    }`,
+                name: `Request logging: ${projectConfig.enableRequestLogging ? 'enabled' : 'disabled'}`,
                 value: 'reqlog'
             },
             {
@@ -400,7 +420,7 @@ async function editLocalConfig(projectConfig: LARSConfigLocal, network: 'mainnet
                 await maybeHoistProjectKeyToGlobal(
                     newKey,
                     globalKeys[network]?.serverPrivateKey,
-                    (val) => {
+                    val => {
                         globalKeys[network]!.serverPrivateKey = val
                         saveGlobalKeys(globalKeys)
                     },
@@ -433,7 +453,7 @@ async function editLocalConfig(projectConfig: LARSConfigLocal, network: 'mainnet
                     await maybeHoistProjectKeyToGlobal(
                         newArc,
                         globalKeys[network]?.taalApiKey,
-                        (val) => {
+                        val => {
                             globalKeys[network]!.taalApiKey = val
                             saveGlobalKeys(globalKeys)
                         },
@@ -488,7 +508,8 @@ async function editOverlayAdvancedConfig(projectConfig: LARSConfigLocal) {
         const cfg = projectConfig.overlayAdvancedConfig
         const choices = [
             {
-                name: `Bearer Token (adminToken): ${cfg.adminToken ? '(set)' : '(not set, will auto-generate)'} `,
+                name: `Bearer Token (adminToken): ${cfg.adminToken ? '(set)' : '(not set, will auto-generate)'
+                    } `,
                 value: 'adminToken'
             },
             {
@@ -524,7 +545,8 @@ async function editOverlayAdvancedConfig(projectConfig: LARSConfigLocal) {
                 {
                     type: 'confirm',
                     name: 'setToken',
-                    message: 'Do you want to set a custom Bearer token? If \'No\', it will be auto-generated at runtime.',
+                    message:
+                        "Do you want to set a custom Bearer token? If 'No', it will be auto-generated at runtime.",
                     default: false
                 }
             ])
@@ -614,7 +636,9 @@ async function editSyncConfiguration(cfg: OverlayAdvancedConfig) {
                 {
                     type: 'list',
                     name: 'action',
-                    message: `Editing "${selectedTopic}" (current: ${JSON.stringify(topicVal)}). Choose an action:`,
+                    message: `Editing "${selectedTopic}" (current: ${JSON.stringify(
+                        topicVal
+                    )}). Choose an action:`,
                     choices: [
                         { name: 'Set to false (no sync)', value: 'false' },
                         { name: 'Set to SHIP (global discovery)', value: 'SHIP' },
@@ -637,8 +661,7 @@ async function editSyncConfiguration(cfg: OverlayAdvancedConfig) {
                     {
                         type: 'input',
                         name: 'endpoints',
-                        message:
-                            'Enter comma-separated endpoints (e.g. https://peer1,https://peer2):'
+                        message: 'Enter comma-separated endpoints (e.g. https://peer1,https://peer2):'
                     }
                 ])
                 const splitted = endpoints
@@ -661,29 +684,23 @@ async function editGlobalKeys() {
     while (!done) {
         console.log(chalk.blue('\nGlobal Keys Menu'))
         console.log(
-            chalk.gray(
-                'Global keys apply to all LARS projects unless overridden at project level.'
-            )
+            chalk.gray('Global keys apply to all LARS projects unless overridden at project level.')
         )
         const choices = [
             {
-                name: `Mainnet server key: ${keys.mainnet?.serverPrivateKey ? 'set' : 'not set'
-                    }`,
+                name: `Mainnet server key: ${keys.mainnet?.serverPrivateKey ? 'set' : 'not set'}`,
                 value: 'm_serverKey'
             },
             {
-                name: `Mainnet TAAL (ARC) key: ${keys.mainnet?.taalApiKey ? 'set' : 'not set'
-                    }`,
+                name: `Mainnet TAAL (ARC) key: ${keys.mainnet?.taalApiKey ? 'set' : 'not set'}`,
                 value: 'm_arcKey'
             },
             {
-                name: `Testnet server key: ${keys.testnet?.serverPrivateKey ? 'set' : 'not set'
-                    }`,
+                name: `Testnet server key: ${keys.testnet?.serverPrivateKey ? 'set' : 'not set'}`,
                 value: 't_serverKey'
             },
             {
-                name: `Testnet TAAL (ARC) key: ${keys.testnet?.taalApiKey ? 'set' : 'not set'
-                    }`,
+                name: `Testnet TAAL (ARC) key: ${keys.testnet?.taalApiKey ? 'set' : 'not set'}`,
                 value: 't_arcKey'
             },
             { name: 'Back', value: 'back' }
@@ -732,16 +749,13 @@ async function editLARSDeploymentInfo(info: CARSConfigInfo) {
         const choices = [
             { name: `Change network (current: ${currentNet})`, value: 'network' },
             {
-                name: `Edit run configuration (current: ${larsConfig.run?.join(', ') || 'none'
-                    })`,
+                name: `Edit run configuration (current: ${larsConfig.run?.join(', ') || 'none'})`,
                 value: 'runConfig'
             },
             { name: 'Back', value: 'back' }
         ]
 
-        console.log(
-            chalk.blue(`\nLARS Deployment Info Menu (current network: ${currentNet})`)
-        )
+        console.log(chalk.blue(`\nLARS Deployment Info Menu (current network: ${currentNet})`))
         const { action } = await inquirer.prompt([
             { type: 'list', name: 'action', message: 'Select an action:', choices }
         ])
@@ -788,11 +802,7 @@ async function editLARSDeploymentInfo(info: CARSConfigInfo) {
             ])
             larsConfig.run = newRun
             fs.writeFileSync(DEPLOYMENT_INFO_PATH, JSON.stringify(info, null, 2))
-            console.log(
-                chalk.green(
-                    `✅ LARS run configuration updated to: ${newRun.join(', ') || 'none'}`
-                )
-            )
+            console.log(chalk.green(`✅ LARS run configuration updated to: ${newRun.join(', ') || 'none'}`))
         } else {
             done = true
         }
@@ -829,7 +839,10 @@ async function mainMenu() {
             { name: `Edit Local Project Config (${network})`, value: 'localConfig' },
             { name: 'Edit LARS Deployment Info', value: 'editDeployment' },
             { name: 'Admin Tools (sync, GASP, etc.)', value: 'adminTools' },
-            { name: 'Start LARS', value: 'start' },
+            { name: 'Start LARS (local only)', value: 'startLocal' },
+            { name: 'Start LARS with ngrok', value: 'startNgrok' },
+            { name: 'Reset LARS (remove local-data)', value: 'reset' },
+            { name: 'Help', value: 'help' },
             { name: 'Exit', value: 'exit' }
         ]
 
@@ -849,8 +862,14 @@ async function mainMenu() {
             larsConfig = getLARSConfigFromDeploymentInfo(updatedInfo)
         } else if (action === 'adminTools') {
             await runAdminTools(projectConfig, larsConfig)
-        } else if (action === 'start') {
-            await startLARS(larsConfig, projectConfig)
+        } else if (action === 'startLocal') {
+            await startLARS(larsConfig, projectConfig, false)
+        } else if (action === 'startNgrok') {
+            await startLARS(larsConfig, projectConfig, true)
+        } else if (action === 'reset') {
+            await resetLARS()
+        } else if (action === 'help') {
+            await open('https://github.com/bitcoin-sv/lars')
         } else {
             done = true
         }
@@ -864,7 +883,11 @@ async function runAdminTools(projectConfig: LARSConfigLocal, larsConfig: CARSCon
     const adminToken = projectConfig.overlayAdvancedConfig?.adminToken
 
     if (!adminToken) {
-        console.log(chalk.yellow('No custom adminToken set in overlayAdvancedConfig. If none was generated, the server will generate a random one at startup. You won\'t be able to use admin routes unless you know it.'))
+        console.log(
+            chalk.yellow(
+                "No custom adminToken set in overlayAdvancedConfig. If none was generated, the server will generate a random one at startup. You won't be able to use admin routes unless you know it."
+            )
+        )
     }
 
     let done = false
@@ -886,36 +909,58 @@ async function runAdminTools(projectConfig: LARSConfigLocal, larsConfig: CARSCon
         if (action === 'back') {
             done = true
         } else {
-            const tokenToUse = adminToken || (
-                await inquirer.prompt([
-                    {
-                        type: 'input',
-                        name: 'tempToken',
-                        message: 'Enter the admin token (Bearer) for your OverlayExpress instance:'
-                    }
-                ])
-            ).tempToken
+            const tokenToUse =
+                adminToken ||
+                (
+                    await inquirer.prompt([
+                        {
+                            type: 'input',
+                            name: 'tempToken',
+                            message: 'Enter the admin token (Bearer) for your OverlayExpress instance:'
+                        }
+                    ])
+                ).tempToken
 
             try {
                 if (action === 'syncAds') {
-                    const resp = await axios.post(`${baseUrl}/admin/syncAdvertisements`, {}, {
-                        headers: {
-                            Authorization: `Bearer ${tokenToUse}`
+                    const resp = await axios.post(
+                        `${baseUrl}/admin/syncAdvertisements`,
+                        {},
+                        {
+                            headers: {
+                                Authorization: `Bearer ${tokenToUse}`
+                            }
                         }
-                    })
-                    console.log(chalk.green(`syncAdvertisements responded: ${JSON.stringify(resp.data)}`))
+                    )
+                    console.log(
+                        chalk.green(
+                            `syncAdvertisements responded: ${JSON.stringify(resp.data, null, 2)}`
+                        )
+                    )
                 } else if (action === 'startGasp') {
-                    const resp = await axios.post(`${baseUrl}/admin/startGASPSync`, {}, {
-                        headers: {
-                            Authorization: `Bearer ${tokenToUse}`
+                    const resp = await axios.post(
+                        `${baseUrl}/admin/startGASPSync`,
+                        {},
+                        {
+                            headers: {
+                                Authorization: `Bearer ${tokenToUse}`
+                            }
                         }
-                    })
-                    console.log(chalk.green(`startGASPSync responded: ${JSON.stringify(resp.data)}`))
+                    )
+                    console.log(
+                        chalk.green(`startGASPSync responded: ${JSON.stringify(resp.data, null, 2)}`)
+                    )
                 }
             } catch (err: any) {
                 console.log(chalk.red(`❌ Admin route failed: ${err.message}`))
                 if (err.response) {
-                    console.log(chalk.red(`Server responded with status ${err.response.status}: ${JSON.stringify(err.response.data)}`))
+                    console.log(
+                        chalk.red(
+                            `Server responded with status ${err.response.status}: ${JSON.stringify(
+                                err.response.data
+                            )}`
+                        )
+                    )
                 }
             }
         }
@@ -924,7 +969,7 @@ async function runAdminTools(projectConfig: LARSConfigLocal, larsConfig: CARSCon
 
 // Add LARS config interactively if none exists
 async function addLARSConfigInteractive(info: CARSConfigInfo) {
-    console.log(chalk.blue('Let’s create a LARS configuration.'))
+    console.log(chalk.blue("Let’s create a LARS configuration."))
     const { network } = await inquirer.prompt([
         {
             type: 'list',
@@ -954,14 +999,12 @@ async function addLARSConfigInteractive(info: CARSConfigInfo) {
         run: runServices
     }
     info.configs = info.configs || []
-    info.configs = info.configs.filter((c) => c.provider !== 'LARS') // ensure only one LARS config
+    info.configs = info.configs.filter(c => c.provider !== 'LARS') // ensure only one LARS config
     info.configs.push(newCfg)
     fs.writeFileSync(DEPLOYMENT_INFO_PATH, JSON.stringify(info, null, 2))
     console.log(
         chalk.green(
-            `✅ LARS configuration "Local LARS" created with network: ${network}, running: ${runServices.join(
-                ', '
-            )}`
+            `✅ LARS configuration "Local LARS" created with network: ${network}, running: ${runServices.join(', ')}`
         )
     )
 }
@@ -980,7 +1023,7 @@ async function ensureFrontendDependencies(info: CARSConfigInfo) {
 
     const packageJsonPath = path.join(frontendDir, 'package.json')
     if (!fs.existsSync(packageJsonPath)) {
-        // If no package.json and the language is html or static, just serve it directly.
+        // If no package.json and the language is basic HTML or static, just serve it directly.
         return
     }
 
@@ -996,11 +1039,12 @@ async function ensureFrontendDependencies(info: CARSConfigInfo) {
     }
 }
 
-// Start LARS
-async function startLARS(larsConfig: CARSConfig, projectConfig: LARSConfigLocal) {
-    console.log(
-        chalk.yellow(figlet.textSync('LARS', { horizontalLayout: 'full' }))
-    )
+/// //////////////////////////////////////////////////////////////////////////////////
+// Start or reset LARS
+/// //////////////////////////////////////////////////////////////////////////////////
+
+async function startLARS(larsConfig: CARSConfig, projectConfig: LARSConfigLocal, withNgrok = false) {
+    console.log(chalk.yellow(figlet.textSync('LARS', { horizontalLayout: 'full' })))
     console.log(chalk.green('Welcome to the LARS development environment! 🚀'))
     console.log(chalk.green("Let's get your local Overlay Services up and running!\n"))
 
@@ -1030,7 +1074,7 @@ async function startLARS(larsConfig: CARSConfig, projectConfig: LARSConfigLocal)
             await maybeHoistProjectKeyToGlobal(
                 key,
                 globalKeys[network]?.serverPrivateKey,
-                (val) => {
+                val => {
                     globalKeys[network]!.serverPrivateKey = val
                     saveGlobalKeys(globalKeys)
                 },
@@ -1045,135 +1089,143 @@ async function startLARS(larsConfig: CARSConfig, projectConfig: LARSConfigLocal)
         process.exit(1)
     }
 
-    // Check dependencies
-    console.log(chalk.blue('🔍 Checking system dependencies...'))
-    // Docker
-    try {
-        execSync('docker --version', { stdio: 'ignore' })
-    } catch (err) {
-        console.error(chalk.red('❌ Docker is not installed or not running.'))
-        console.log(chalk.blue('👉 Install Docker: https://docs.docker.com/engine/install/'))
-        process.exit(1)
-    }
-    // Docker Compose
-    try {
-        execSync('docker compose version', { stdio: 'ignore' })
-    } catch (err) {
-        console.error(chalk.red('❌ Docker Compose plugin is not installed.'))
-        console.log(chalk.blue('👉 Install Docker Compose: https://docs.docker.com/compose/install/'))
-        process.exit(1)
-    }
-    // ngrok
-    try {
-        execSync('ngrok version', { stdio: 'ignore' })
-    } catch (err) {
-        console.error(chalk.red('❌ ngrok is not installed.'))
-        console.log(chalk.blue('👉 Install ngrok: https://ngrok.com/download'))
-        process.exit(1)
-    }
-    // MetaNet Client
-    const localWallet = new WalletClient('auto', 'localhost')
-    try {
-        const { version } = await localWallet.getVersion()
-        console.log(chalk.blue(`💰 Using local wallet version: ${version}`))
-    } catch (err) {
-        console.error(chalk.red('❌ MetaNet Client is not installed or not running.'))
-        console.log(chalk.blue('👉 Download MetaNet Client: https://projectbabbage.com/'))
-        process.exit(1)
-    }
-
-    // Check server funding
-    const wallet = await makeWallet(network === 'testnet' ? 'test' : 'main', finalServerKey);
-    const { outputs: outputsInDefaultBasket } = await wallet.listOutputs({ basket: 'default', limit: 10000 });
-    const balance = outputsInDefaultBasket.reduce((a, e) => a + e.satoshis, 0);
-    if (balance < 10000) {
-        console.log(chalk.red(`⚠️  Your server's balance is low: ${balance} satoshis.`))
-        const { action } = await inquirer.prompt([
-            {
-                type: 'list',
-                name: 'action',
-                message: "Your server's balance is low. What would you like to do?",
-                choices: [
-                    '💰 Fund server automatically (using local MetaNet Client)',
-                    '📝 Print manual funding instructions',
-                    '🚀 Continue without funding'
-                ]
-            }
-        ])
-
-        if (action.startsWith('💰')) {
-            const { amountToFund } = await inquirer.prompt([
-                {
-                    type: 'input',
-                    name: 'amountToFund',
-                    message: 'Enter the amount to fund (in satoshis):',
-                    default: '30000',
-                    validate: function (value: string) {
-                        const valid = !isNaN(parseInt(value)) && parseInt(value) > 0
-                        return valid || 'Please enter a positive number.'
-                    },
-                    filter: Number
-                }
-            ])
-            await fundWallet(wallet, amountToFund, finalServerKey, network)
-            console.log(chalk.green(`🎉 Server funded with ${amountToFund} satoshis.`))
-        } else if (action.startsWith('📝')) {
-            console.log(chalk.blue('\nManual Funding Instructions:'))
-            console.log('1. Use KeyFunder to fund your server.')
-            console.log(`2. Your server's wallet private key is: ${finalServerKey}`)
-            console.log('3. Visit https://keyfunder.babbage.systems and follow the instructions.')
-            await inquirer.prompt([
-                {
-                    type: 'input',
-                    name: 'wait',
-                    message: "Press enter when you're ready to continue."
-                }
-            ])
-        } else {
-            console.log(chalk.yellow('🚀 Continuing without funding.'))
+    // Check Docker dependencies only if we run backend
+    const runBackend = larsConfig.run?.includes('backend')
+    if (runBackend) {
+        console.log(chalk.blue('🔍 Checking system dependencies for backend...'))
+        // Docker
+        try {
+            execSync('docker --version', { stdio: 'ignore' })
+        } catch (err) {
+            console.error(chalk.red('❌ Docker is not installed or not running.'))
+            console.log(chalk.blue('👉 Install Docker: https://docs.docker.com/engine/install/'))
+            process.exit(1)
         }
-    } else {
-        console.log(chalk.green(`✅ Server balance is sufficient: ${balance} satoshis.`))
+        // Docker Compose
+        try {
+            execSync('docker compose version', { stdio: 'ignore' })
+        } catch (err) {
+            console.error(chalk.red('❌ Docker Compose plugin is not installed.'))
+            console.log(
+                chalk.blue('👉 Install Docker Compose: https://docs.docker.com/compose/install/')
+            )
+            process.exit(1)
+        }
     }
 
-    // Start ngrok
-    console.log(chalk.blue('🌐 Starting ngrok...'))
-    const ngrokUrl = await ngrok.connect({ addr: 8080 })
-    console.log(chalk.green(`🚀 ngrok tunnel established at ${ngrokUrl}`))
+    // If withNgrok is requested, check ngrok
+    let hostingUrl = 'localhost:8080'
+    if (withNgrok) {
+        try {
+            execSync('ngrok version', { stdio: 'ignore' })
+        } catch (err) {
+            console.error(chalk.red('❌ ngrok is not installed.'))
+            console.log(chalk.blue('👉 Install ngrok: https://ngrok.com/download'))
+            process.exit(1)
+        }
+    }
 
-    // Check contracts
+    // Check local MetaNet client if the user might want to fund
+    // (only do this if we definitely need to check funding)
+    let wallet: WalletInterface | undefined
+    if (runBackend) {
+        wallet = await makeWallet(network === 'testnet' ? 'test' : 'main', finalServerKey)
+        const { outputs: outputsInDefaultBasket } = await wallet.listOutputs({ basket: 'default', limit: 10000 })
+        const balance = outputsInDefaultBasket.reduce((a, e) => a + e.satoshis, 0)
+        if (balance < 10000) {
+            console.log(chalk.red(`⚠️  Your server's balance is low: ${balance} satoshis.`))
+            const { action } = await inquirer.prompt([
+                {
+                    type: 'list',
+                    name: 'action',
+                    message: "Your server's balance is low. What would you like to do?",
+                    choices: [
+                        '💰 Fund server automatically (using local MetaNet Client)',
+                        '📝 Print manual funding instructions',
+                        '🚀 Continue without funding'
+                    ]
+                }
+            ])
+
+            if (action.startsWith('💰')) {
+                const { amountToFund } = await inquirer.prompt([
+                    {
+                        type: 'input',
+                        name: 'amountToFund',
+                        message: 'Enter the amount to fund (in satoshis):',
+                        default: '30000',
+                        validate: function (value: string) {
+                            const valid = !isNaN(parseInt(value)) && parseInt(value) > 0
+                            return valid || 'Please enter a positive number.'
+                        },
+                        filter: Number
+                    }
+                ])
+                await fundWallet(wallet, amountToFund, finalServerKey, network)
+                console.log(chalk.green(`🎉 Server funded with ${amountToFund} satoshis.`))
+            } else if (action.startsWith('📝')) {
+                console.log(chalk.blue('\nManual Funding Instructions:'))
+                console.log('1. Use WUI to fund your server.')
+                console.log(`2. Your server's wallet private key is: ${finalServerKey}`)
+                console.log('3. Visit https://wui.bapp.dev and export funds to the key.')
+                await inquirer.prompt([
+                    {
+                        type: 'input',
+                        name: 'wait',
+                        message: "Press enter when you're ready to continue."
+                    }
+                ])
+            } else {
+                console.log(chalk.yellow('🚀 Continuing without funding.'))
+            }
+        } else {
+            console.log(chalk.green(`✅ Server balance is sufficient: ${balance} satoshis.`))
+        }
+    }
+
+    // If user specified withNgrok, attempt to connect
+    if (withNgrok) {
+        console.log(chalk.blue('🌐 Starting ngrok...'))
+        const ngrokUrl = await ngrok.connect({ addr: 8080 })
+        console.log(chalk.green(`🚀 ngrok tunnel established at ${ngrokUrl}`))
+        hostingUrl = new URL(ngrokUrl).host
+    }
+
+    // Check if contracts are required
     const info = loadDeploymentInfo()
     let enableContracts = false
     if (info.contracts && info.contracts.language === 'sCrypt') {
         enableContracts = true
     } else if (info.contracts && info.contracts.language && info.contracts.language !== 'sCrypt') {
-        console.error(chalk.red(`❌ BSV Contract language not supported: ${info.contracts.language}`))
+        console.error(
+            chalk.red(`❌ BSV Contract language not supported: ${info.contracts.language}`)
+        )
         process.exit(1)
     }
 
     // Ensure local data dir and write docker-compose.yml (backend only if backend is selected)
     ensureLocalDataDir()
-    const runBackend = larsConfig.run?.includes('backend')
     const runFrontend = larsConfig.run?.includes('frontend')
 
-    const composeContent = generateDockerCompose(
-        new URL(ngrokUrl).host,
-        LOCAL_DATA_PATH,
-        finalServerKey,
-        enableContracts,
-        network,
-        finalArcKey,
-        projectConfig.enableRequestLogging,
-        projectConfig.enableGASPSync,
-        runBackend,
-        projectConfig.overlayAdvancedConfig
-    )
-    const composeYaml = yaml.stringify(composeContent)
-    const composeFilePath = path.join(LOCAL_DATA_PATH, 'docker-compose.yml')
-    fs.writeFileSync(composeFilePath, composeYaml)
-    console.log(chalk.green('✅ docker-compose.yml generated.'))
-
     if (runBackend) {
+        // Generate docker-compose with MySQL, Mongo, plus Adminer and mongo-express
+        const composeContent = generateDockerCompose(
+            hostingUrl,
+            LOCAL_DATA_PATH,
+            finalServerKey,
+            enableContracts,
+            network,
+            finalArcKey,
+            projectConfig.enableRequestLogging,
+            projectConfig.enableGASPSync,
+            runBackend,
+            projectConfig.overlayAdvancedConfig
+        )
+        const composeYaml = yaml.stringify(composeContent)
+        const composeFilePath = path.join(LOCAL_DATA_PATH, 'docker-compose.yml')
+        fs.writeFileSync(composeFilePath, composeYaml)
+        console.log(chalk.green('✅ docker-compose.yml generated.'))
+
         // Generate overlay-dev-container files
         console.log(chalk.blue('\n📁 Generating overlay-dev-container files...'))
         const overlayDevContainerPath = path.join(LOCAL_DATA_PATH, 'overlay-dev-container')
@@ -1193,72 +1245,101 @@ async function startLARS(larsConfig: CARSConfig, projectConfig: LARSConfigLocal)
         }
 
         const packageJsonContent = generatePackageJson(backendDependencies)
-        fs.writeFileSync(path.join(overlayDevContainerPath, 'package.json'), JSON.stringify(packageJsonContent, null, 2))
+        fs.writeFileSync(
+            path.join(overlayDevContainerPath, 'package.json'),
+            JSON.stringify(packageJsonContent, null, 2)
+        )
         fs.writeFileSync(path.join(overlayDevContainerPath, 'tsconfig.json'), generateTsConfig())
         fs.writeFileSync(path.join(overlayDevContainerPath, 'wait-for-services.sh'), generateWaitScript())
         fs.writeFileSync(path.join(overlayDevContainerPath, 'Dockerfile'), generateDockerfile(enableContracts))
         console.log(chalk.green('✅ overlay-dev-container files generated.'))
 
-        // Set up file watchers for backend
+        // Set up file watchers for backend (contracts compilation triggers, etc.)
         console.log(chalk.blue('\n👀 Setting up backend file watchers...'))
         const backendSrcPath = path.resolve(PROJECT_ROOT, 'backend', 'src')
-        const watcher = chokidar.watch(backendSrcPath, { ignoreInitial: true })
-        watcher.on('all', (event, filePath) => {
-            console.log(chalk.yellow(`🔄 File ${event}: ${filePath}`))
-            if (filePath.includes(path.join('backend', 'src', 'contracts')) && enableContracts) {
-                console.log(chalk.blue('🔨 Changes detected in contracts directory. Running npm run compile...'))
-                const compileProcess = spawn('npm', ['run', 'compile'], {
-                    cwd: path.resolve(PROJECT_ROOT, 'backend'),
-                    stdio: 'inherit'
-                })
+        if (fs.existsSync(backendSrcPath)) {
+            const watcher = chokidar.watch(backendSrcPath, { ignoreInitial: true })
+            watcher.on('all', (event, filePath) => {
+                console.log(chalk.yellow(`🔄 File ${event}: ${filePath}`))
+                if (filePath.includes(path.join('backend', 'src', 'contracts')) && enableContracts) {
+                    console.log(
+                        chalk.blue('🔨 Changes detected in contracts directory. Running npm run compile...')
+                    )
+                    const compileProcess = spawn('npm', ['run', 'compile'], {
+                        cwd: path.resolve(PROJECT_ROOT, 'backend'),
+                        stdio: 'inherit'
+                    })
 
-                compileProcess.on('exit', (code) => {
-                    if (code === 0) {
-                        console.log(chalk.green('✅ Contract compilation completed.'))
-                    } else {
-                        console.error(chalk.red(`❌ Contract compilation failed with exit code ${code}.`))
-                    }
-                })
-            }
-        })
-    }
+                    compileProcess.on('exit', code => {
+                        if (code === 0) {
+                            console.log(chalk.green('✅ Contract compilation completed.'))
+                        } else {
+                            console.error(
+                                chalk.red(`❌ Contract compilation failed with exit code ${code}.`)
+                            )
+                        }
+                    })
+                }
+            })
+        } else {
+            console.log(chalk.yellow(`No backend src directory found at: ${backendSrcPath}`))
+        }
 
-    // Start backend containers if selected
-    let backendProcess: any
-    if (runBackend) {
+        // Start Docker Compose
         console.log(chalk.blue('\n🐳 Starting Backend Docker Compose...'))
-        backendProcess = spawn('docker', ['compose', 'up', '--build'], {
+        const backendProcess = spawn('docker', ['compose', 'up', '--build'], {
             cwd: LOCAL_DATA_PATH,
             stdio: 'inherit'
         })
-    }
 
-    if (runFrontend) {
-        // Ensure frontend dependencies
-        await ensureFrontendDependencies(info)
+        // On SIGINT or SIGTERM, gracefully bring down Docker Compose
+        const handleSignal = () => {
+            console.log(chalk.yellow('\nReceived interrupt signal. Stopping LARS...'))
+            try {
+                execSync('docker compose down', { cwd: LOCAL_DATA_PATH, stdio: 'inherit' })
+            } catch (err) {
+                console.error(chalk.red('Error stopping Docker Compose:'), err)
+            }
+            process.exit(0)
+        }
+        process.on('SIGINT', handleSignal)
+        process.on('SIGTERM', handleSignal)
 
-        // Wait for backend if backend is included (to ensure services are up), otherwise proceed immediately
-        if (runBackend) {
+        if (runFrontend) {
+            // Wait for backend before starting the frontend
             console.log(chalk.blue('⏳ Waiting for backend services to be ready before starting frontend...'))
             await waitForBackendServices()
+            await startFrontend(info)
+        } else {
+            console.log(chalk.green('\n🎉 LARS environment (backend only) is ready!'))
         }
 
-        // Start frontend
-        await startFrontend(info)
-    }
-
-    if (runBackend && backendProcess) {
         backendProcess.on('exit', (code: number) => {
+            // If Docker compose stops, let's exit gracefully
             if (code === 0) {
                 console.log(chalk.green('🐳 Backend services going down.'))
             } else {
                 console.log(chalk.red(`❌ Backend services exited with code ${code}`))
             }
-            console.log(chalk.blue('👋 LARS will see you next time!'))
+            // Attempt a compose down just in case
+            try {
+                execSync('docker compose down', { cwd: LOCAL_DATA_PATH, stdio: 'ignore' })
+            } catch { }
+            console.log(chalk.blue('👋 LARS shutting down.'))
+            process.exit(0)
+        })
+    } else if (runFrontend) {
+        // If only the frontend is selected:
+        await startFrontend(info)
+        console.log(chalk.green('\n🎉 LARS environment (frontend only) is ready!'))
+        // Wait for user to Ctrl+C if they want to stop
+        process.on('SIGINT', () => {
+            console.log(chalk.yellow('\nReceived interrupt signal. Stopping LARS...'))
             process.exit(0)
         })
     } else {
-        console.log(chalk.green('\n🎉 LARS development environment is ready! Happy hacking!'))
+        console.log(chalk.yellow('⚠️ You have no backend or frontend configured in LARS run settings.'))
+        console.log(chalk.green('Done. Nothing to run.'))
     }
 }
 
@@ -1278,7 +1359,7 @@ async function waitForBackendServices() {
             return
         } catch {
             process.stdout.write('.')
-            await new Promise((res) => setTimeout(res, waitTime))
+            await new Promise(res => setTimeout(res, waitTime))
         }
     }
     console.log(
@@ -1298,6 +1379,9 @@ async function startFrontend(info: CARSConfigInfo) {
         console.log(chalk.red(`❌ Frontend directory not found at ${frontendDir}, skipping.`))
         return
     }
+
+    // Ensure dependencies
+    await ensureFrontendDependencies(info)
 
     const { language } = info.frontend
     if (language === 'react') {
@@ -1344,10 +1428,10 @@ async function startFrontend(info: CARSConfigInfo) {
     }
 }
 
-/// //////////////////////////////////////////////////////////////////////////////////
-// Generation of config files
-/// //////////////////////////////////////////////////////////////////////////////////
-
+/**
+ * Generates a Docker Compose config with MySQL, Mongo, Adminer, mongo-express, and overlay-dev-container.
+ * Adminer for MySQL on 8081, mongo-express for Mongo on 8082.
+ */
 function generateDockerCompose(
     hostingUrl: string,
     localDataPath: string,
@@ -1413,6 +1497,7 @@ function generateDockerCompose(
             )
         }
 
+        // MySQL & Adminer
         services.mysql = {
             image: 'mysql:8.0',
             container_name: 'overlay-mysql',
@@ -1431,13 +1516,37 @@ function generateDockerCompose(
                 retries: 3
             }
         }
+        services.adminer = {
+            image: 'adminer',
+            container_name: 'overlay-adminer',
+            restart: 'always',
+            ports: ['8081:8080'],
+            environment: {
+                ADMINER_DEFAULT_SERVER: 'mysql'
+            },
+            depends_on: ['mysql']
+        }
 
+        // Mongo & mongo-express
         services.mongo = {
             image: 'mongo:6.0',
             container_name: 'overlay-mongo',
             ports: ['27017:27017'],
             volumes: [`${path.resolve(localDataPath, 'mongo')}:/data/db`],
             command: ['mongod', '--quiet']
+        }
+        services.mongoexpress = {
+            image: 'mongo-express',
+            container_name: 'overlay-mongo-express',
+            restart: 'always',
+            ports: ['8082:8081'],
+            environment: {
+                ME_CONFIG_MONGODB_SERVER: 'mongo',
+                ME_CONFIG_MONGODB_PORT: '27017',
+                ME_CONFIG_BASICAUTH_USERNAME: '',
+                ME_CONFIG_BASICAUTH_PASSWORD: ''
+            },
+            depends_on: ['mongo']
         }
     }
     const composeContent: any = { services }
@@ -1618,6 +1727,34 @@ echo "$host2:$port2 is up"
 exec "$@"`
 }
 
+/**
+ * Deletes the local-data directory after confirmation, or immediately if --force
+ */
+async function resetLARS(force?: boolean) {
+    const proceed =
+        force ||
+        (await promptYesNo(
+            'Are you sure you want to reset LARS? This will remove the entire local-data folder, destroying all local databases.',
+            false
+        ))
+    if (!proceed) {
+        console.log(chalk.yellow('Reset canceled.'))
+        return
+    }
+
+    if (fs.existsSync(LOCAL_DATA_PATH)) {
+        console.log(chalk.blue('Stopping Docker Compose (if running)...'))
+        try {
+            execSync('docker compose down', { cwd: LOCAL_DATA_PATH, stdio: 'ignore' })
+        } catch { }
+        console.log(chalk.blue(`Removing local-data directory at: ${LOCAL_DATA_PATH}`))
+        fs.removeSync(LOCAL_DATA_PATH)
+        console.log(chalk.green('✅ LARS has been reset.'))
+    } else {
+        console.log(chalk.yellow(`No local-data directory found at ${LOCAL_DATA_PATH}. Nothing to remove.`))
+    }
+}
+
 /// //////////////////////////////////////////////////////////////////////////////////
 // CLI Commands
 /// //////////////////////////////////////////////////////////////////////////////////
@@ -1671,8 +1808,9 @@ program
 
 program
     .command('start')
-    .description('Start LARS development environment')
-    .action(async () => {
+    .description('Start LARS development environment (local only by default)')
+    .option('--with-ngrok', 'Use ngrok instead of localhost')
+    .action(async (opts) => {
         const info = loadDeploymentInfo()
         let larsConfig = getLARSConfigFromDeploymentInfo(info)
         if (!larsConfig) {
@@ -1685,10 +1823,18 @@ program
             process.exit(1)
         }
         const projectConfig = loadProjectConfig()
-        await startLARS(larsConfig, projectConfig)
+        await startLARS(larsConfig, projectConfig, !!opts.with_ngrok)
     })
 
-// === For completeness, if user runs `lars` with no subcommand, show the main menu
+program
+    .command('reset')
+    .description('Remove the local-data folder (and all local LARS data)')
+    .option('--force', 'Perform the reset without prompting for confirmation')
+    .action(async (opts) => {
+        await resetLARS(opts.force)
+    })
+
+// Default action => main menu
 program.action(async () => {
     await mainMenu()
 })
