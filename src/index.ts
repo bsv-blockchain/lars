@@ -1126,7 +1126,6 @@ async function startLARS(larsConfig: CARSConfig, projectConfig: LARSConfigLocal,
     }
 
     // Check local MetaNet client if the user might want to fund
-    // (only do this if we definitely need to check funding)
     let wallet: WalletInterface | undefined
     if (runBackend) {
         wallet = await makeWallet(network === 'testnet' ? 'test' : 'main', finalServerKey)
@@ -1206,6 +1205,43 @@ async function startLARS(larsConfig: CARSConfig, projectConfig: LARSConfigLocal,
     // Ensure local data dir and write docker-compose.yml (backend only if backend is selected)
     ensureLocalDataDir()
     const runFrontend = larsConfig.run?.includes('frontend')
+
+    // -------------------------------------------------------
+    // Keep references to the child processes we spawn:
+    let backendLogsProcess: ChildProcess | null = null
+    let frontendProcess: ChildProcess | null = null
+
+    // Define a single cleanup routine that stops everything:
+    const stopAll = (exitCode?: number) => {
+        console.log(chalk.yellow('\nReceived interrupt signal. Stopping LARS...'))
+        // 1) Kill the frontend dev process if running
+        if (frontendProcess) {
+            console.log(chalk.blue('Stopping frontend dev process...'))
+            try {
+                frontendProcess.kill('SIGINT')
+            } catch (err) {
+                console.error(chalk.red('Error killing frontend process:'), err)
+            }
+            frontendProcess = null
+        }
+
+        // 2) If the backend was running, bring Docker Compose down
+        if (runBackend) {
+            try {
+                execSync('docker compose down', { cwd: LOCAL_DATA_PATH, stdio: 'inherit' })
+            } catch (err) {
+                console.error(chalk.red('Error stopping Docker Compose:'), err)
+            }
+        }
+
+        // Finally exit
+        process.exit(exitCode ?? 0)
+    }
+
+    // Attach the same cleanup routine to SIGINT / SIGTERM
+    process.on('SIGINT', () => stopAll(0))
+    process.on('SIGTERM', () => stopAll(0))
+    // -------------------------------------------------------
 
     if (runBackend) {
         // Generate docker-compose with MySQL, Mongo, plus Adminer and mongo-express
@@ -1287,56 +1323,31 @@ async function startLARS(larsConfig: CARSConfig, projectConfig: LARSConfigLocal,
 
         // Start Docker Compose
         console.log(chalk.blue('\n🐳 Starting Backend Docker Compose...'))
-        const backendProcess = spawn('docker', ['compose', 'up', '--build'], {
+        execSync('docker compose up -d', { cwd: LOCAL_DATA_PATH, stdio: 'inherit' })
+        backendLogsProcess = spawn('docker', ['compose', 'logs', '-f'], {
             cwd: LOCAL_DATA_PATH,
             stdio: 'inherit'
         })
 
-        // On SIGINT or SIGTERM, gracefully bring down Docker Compose
-        const handleSignal = () => {
-            console.log(chalk.yellow('\nReceived interrupt signal. Stopping LARS...'))
-            try {
-                execSync('docker compose down', { cwd: LOCAL_DATA_PATH, stdio: 'inherit' })
-            } catch (err) {
-                console.error(chalk.red('Error stopping Docker Compose:'), err)
-            }
-            process.exit(0)
-        }
-        process.on('SIGINT', handleSignal)
-        process.on('SIGTERM', handleSignal)
+        // If Docker logs process exits, call stopAll
+        backendLogsProcess.on('exit', (code: number) => {
+            console.log(chalk.red(`\nBackend logs process exited with code: ${code}`))
+            stopAll(code || 0)
+        })
 
         if (runFrontend) {
             // Wait for backend before starting the frontend
             console.log(chalk.blue('⏳ Waiting for backend services to be ready before starting frontend...'))
             await waitForBackendServices()
-            await startFrontend(info)
+            // Store the returned ChildProcess reference
+            frontendProcess = await startFrontend(info)
         } else {
             console.log(chalk.green('\n🎉 LARS environment (backend only) is ready!'))
         }
-
-        backendProcess.on('exit', (code: number) => {
-            // If Docker compose stops, let's exit gracefully
-            if (code === 0) {
-                console.log(chalk.green('🐳 Backend services going down.'))
-            } else {
-                console.log(chalk.red(`❌ Backend services exited with code ${code}`))
-            }
-            // Attempt a compose down just in case
-            try {
-                execSync('docker compose down', { cwd: LOCAL_DATA_PATH, stdio: 'ignore' })
-            } catch { }
-            console.log(chalk.blue('👋 LARS shutting down.'))
-            process.exit(0)
-        })
     } else if (runFrontend) {
         // If only the frontend is selected:
-        await startFrontend(info)
+        frontendProcess = await startFrontend(info)
         console.log(chalk.green('\n🎉 LARS environment (frontend only) is ready!'))
-        // Wait for user to Ctrl+C if they want to stop
-        process.on('SIGINT', () => {
-            console.log(chalk.yellow('\nReceived interrupt signal. Stopping LARS...'))
-            process.exit(0)
-        })
     } else {
         console.log(chalk.yellow('⚠️ You have no backend or frontend configured in LARS run settings.'))
         console.log(chalk.green('Done. Nothing to run.'))
@@ -1365,33 +1376,35 @@ async function waitForBackendServices() {
     console.log(
         chalk.red(`❌ Backend did not become ready after ${(maxAttempts * waitTime) / 1000} seconds.`)
     )
+
 }
 
-// Starting frontend logic
-async function startFrontend(info: CARSConfigInfo) {
+async function startFrontend(info: CARSConfigInfo): Promise<ChildProcess | null> {
     if (!info.frontend || !info.frontend.language) {
         console.log(chalk.yellow('⚠️ No frontend configuration found, skipping frontend startup.'))
-        return
+        return null
     }
 
     const frontendDir = path.resolve(PROJECT_ROOT, info.frontend.sourceDirectory || 'frontend')
     if (!fs.existsSync(frontendDir)) {
         console.log(chalk.red(`❌ Frontend directory not found at ${frontendDir}, skipping.`))
-        return
+        return null
     }
 
     // Ensure dependencies
     await ensureFrontendDependencies(info)
 
     const { language } = info.frontend
+    let childProc: ChildProcess | null = null
+
     if (language === 'react') {
         console.log(chalk.blue('🎨 Starting React frontend...'))
         // Start `npm run start` in frontendDir
-        const frontendProcess = spawn('npm', ['run', 'start'], {
+        childProc = spawn('npm', ['run', 'start'], {
             cwd: frontendDir,
             stdio: 'inherit'
         })
-        frontendProcess.on('exit', (code: number) => {
+        childProc.on('exit', (code: number) => {
             if (code === 0) {
                 console.log(chalk.green('🎨 React frontend stopped.'))
             } else {
@@ -1409,14 +1422,14 @@ async function startFrontend(info: CARSConfigInfo) {
                 execSync('npm install -g serve', { stdio: 'inherit' })
             } catch (err) {
                 console.error(chalk.red('❌ Failed to install "serve" globally.'))
-                return
+                return null
             }
         }
-        const serveProcess = spawn('serve', ['-l', '3000', '.'], {
+        childProc = spawn('serve', ['-l', '3000', '.'], {
             cwd: frontendDir,
             stdio: 'inherit'
         })
-        serveProcess.on('exit', (code: number) => {
+        childProc.on('exit', (code: number) => {
             if (code === 0) {
                 console.log(chalk.green('🎨 Static HTML frontend stopped.'))
             } else {
@@ -1425,7 +1438,10 @@ async function startFrontend(info: CARSConfigInfo) {
         })
     } else {
         console.log(chalk.red(`❌ Frontend language ${language} not supported.`))
+        return null
     }
+
+    return childProc
 }
 
 /**
@@ -1476,7 +1492,7 @@ function generateDockerCompose(
     }
 
     const services: any = {}
-    // If we're running backend:
+
     if (runBackend) {
         services['overlay-dev-container'] = {
             build: {
@@ -1549,6 +1565,7 @@ function generateDockerCompose(
             depends_on: ['mongo']
         }
     }
+
     const composeContent: any = { services }
     return composeContent
 }
