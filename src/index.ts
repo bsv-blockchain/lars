@@ -1323,7 +1323,7 @@ async function startLARS(larsConfig: CARSConfig, projectConfig: LARSConfigLocal,
 
         // Start Docker Compose
         console.log(chalk.blue('\n🐳 Starting Backend Docker Compose...'))
-        execSync('docker compose up -d', { cwd: LOCAL_DATA_PATH, stdio: 'inherit' })
+        execSync('docker compose up --build -d', { cwd: LOCAL_DATA_PATH, stdio: 'inherit' })
         backendLogsProcess = spawn('docker', ['compose', 'logs', '-f'], {
             cwd: LOCAL_DATA_PATH,
             stdio: 'inherit'
