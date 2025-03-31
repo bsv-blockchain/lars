@@ -19,6 +19,7 @@
     "author": "BSV Association",
     "license": "SEE LICENSE IN LICENSE.txt",
     "dependencies": {
+        "@bsv/overlay-express": "^0.3.17",
         "@bsv/sdk": "^1.4.4",
         "@bsv/wallet-toolbox-client": "^1.1.31",
         "axios": "^1.7.9",
