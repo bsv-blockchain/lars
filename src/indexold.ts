@@ -1361,38 +1361,19 @@ async function startLARS (
       console.log(chalk.blue('Stopping frontend dev process...'))
       try {
         frontendProcess.kill('SIGINT')
-        frontendProcess.on('exit', () => {
-          console.log(chalk.green('✅ Frontend process stopped.'))
-        })
       } catch (err) {
         console.error(chalk.red('Error killing frontend process:'), err)
       }
       frontendProcess = null
     }
 
-    // 2) Kill the detached logs process if running
-    if (backendLogsProcess) {
-      console.log(chalk.blue('Stopping backend logs process...'))
-      try {
-        backendLogsProcess.kill('SIGTERM')
-        backendLogsProcess = null
-      } catch (err) {
-        console.error(chalk.red('Error killing logs process:'), err)
-      }
-    }
-
-    // 3) If the backend was running, bring Docker Compose down
+    // 2) If the backend was running, bring Docker Compose down
     if (runBackend) {
-      console.log(chalk.blue('Stopping Docker Compose services...'))
       try {
-        execSync(
-          `docker compose -p lars_${path.basename(process.cwd())} down`,
-          {
-            cwd: LOCAL_DATA_PATH,
-            stdio: 'inherit'
-          }
-        )
-        console.log(chalk.green('✅ Docker Compose services stopped.'))
+        execSync('docker compose down', {
+          cwd: LOCAL_DATA_PATH,
+          stdio: 'inherit'
+        })
       } catch (err) {
         console.error(chalk.red('Error stopping Docker Compose:'), err)
       }
@@ -1521,50 +1502,22 @@ async function startLARS (
     }
 
     // Start Docker Compose
-    console.log(chalk.blue('\n🐳 Starting Backend Docker Compose with -p...'))
-    const projectName = `lars_${path.basename(process.cwd())}`
-    console.log(
-      chalk.blue(`\n🐳 Full projectName path for local data: ${projectName}`)
-    )
-    try {
-      execSync(`docker compose -p ${projectName} up -d`, {
-        cwd: LOCAL_DATA_PATH,
-        stdio: 'inherit'
-      })
-    } catch (err) {
-      console.error(
-        chalk.red('❌ Failed to start Docker Compose:'),
-        err.message
-      )
-      process.exit(1)
-    }
-
-    // Run logs in detached mode (background process)
-    console.log(chalk.blue('📜 Starting background logs for Docker Compose...'))
-    backendLogsProcess = spawn(
-      'docker',
-      ['compose', '-p', projectName, 'logs', '-f'],
-      {
-        cwd: LOCAL_DATA_PATH,
-        stdio: 'inherit',
-        detached: true,
-        shell: true
-      }
-    )
-    backendLogsProcess.unref() // Allow Node.js to exit without waiting for this process
-
-    // Handle logs process exit
-    backendLogsProcess.on('exit', (code: number) => {
-      console.log(
-        chalk.yellow(`\nBackend logs process exited with code: ${code}`)
-      )
-      if (code !== 0) {
-        console.error(chalk.red('Logs process failed unexpectedly.'))
-        // Don’t call stopAll here—let SIGINT handle cleanup
-      } else {
-        console.log(chalk.blue('Logs stopped, but LARS continues running.'))
-      }
+    console.log(chalk.blue('\n🐳 Starting Backend Docker Compose...'))
+    execSync('docker compose up --build -d', {
+      cwd: LOCAL_DATA_PATH,
+      stdio: 'inherit'
     })
+    backendLogsProcess = spawn('docker', ['compose', 'logs', '-f'], {
+      cwd: LOCAL_DATA_PATH,
+      stdio: 'inherit'
+    })
+
+    // If Docker logs process exits, call stopAll
+    backendLogsProcess.on('exit', (code: number) => {
+      console.log(chalk.red(`\nBackend logs process exited with code: ${code}`))
+      stopAll(code || 0)
+    })
+
     if (runFrontend) {
       // Wait for backend before starting the frontend
       console.log(
@@ -1599,24 +1552,25 @@ async function waitForBackendServices () {
   const maxAttempts = 30
   const waitTime = 2000 // ms
   const url = 'http://localhost:8080'
-  console.log(chalk.blue(`🔍 Checking backend health at ${url}...`))
+
+  console.log(chalk.blue('🔍 Checking backend health endpoint...'))
   for (let i = 0; i < maxAttempts; i++) {
     try {
-      const response = await axios.get(url)
-      console.log(chalk.green(`✅ Backend responded: ${response.status}`))
+      await axios.get(url)
+      console.log(chalk.green('✅ Backend is ready!'))
       return
-    } catch (err) {
-      console.log(
-        chalk.yellow(`Attempt ${i + 1}/${maxAttempts} failed: ${err.message}`)
-      )
+    } catch {
       process.stdout.write('.')
       await new Promise(res => setTimeout(res, waitTime))
     }
   }
   console.log(
-    chalk.red(`❌ Backend not ready after ${(maxAttempts * waitTime) / 1000}s`)
+    chalk.red(
+      `❌ Backend did not become ready after ${
+        (maxAttempts * waitTime) / 1000
+      } seconds.`
+    )
   )
-  throw new Error('Backend failed to start')
 }
 
 async function startFrontend (
@@ -1747,13 +1701,13 @@ function generateDockerCompose (
 
   const services: any = {}
 
-  // Hard coded container names have been removed, now generated by -p flag
   if (runBackend) {
     services['overlay-dev-container'] = {
       build: {
         context: '..',
         dockerfile: './local-data/overlay-dev-container/Dockerfile'
       },
+      container_name: 'overlay-dev-container',
       restart: 'always',
       ports: ['8080:8080'],
       environment: env,
@@ -1766,9 +1720,11 @@ function generateDockerCompose (
         `${path.resolve(PROJECT_ROOT, 'backend', 'artifacts')}:/app/artifacts`
       )
     }
+
     // MySQL & Adminer
     services.mysql = {
       image: 'mysql:8.0',
+      container_name: 'overlay-mysql',
       environment: {
         MYSQL_DATABASE: 'overlay',
         MYSQL_USER: 'overlayAdmin',
@@ -1784,9 +1740,9 @@ function generateDockerCompose (
         retries: 3
       }
     }
-
     services.adminer = {
       image: 'adminer',
+      container_name: 'overlay-adminer',
       restart: 'always',
       ports: ['8081:8080'],
       environment: {
@@ -1794,16 +1750,18 @@ function generateDockerCompose (
       },
       depends_on: ['mysql']
     }
+
     // Mongo & mongo-express
     services.mongo = {
       image: 'mongo:6.0',
+      container_name: 'overlay-mongo',
       ports: ['27017:27017'],
       volumes: [`${path.resolve(localDataPath, 'mongo')}:/data/db`],
       command: ['mongod', '--quiet']
     }
-
     services.mongoexpress = {
       image: 'mongo-express',
+      container_name: 'overlay-mongo-express',
       restart: 'always',
       ports: ['8082:8081'],
       environment: {
