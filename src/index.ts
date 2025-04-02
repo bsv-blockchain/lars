@@ -1386,7 +1386,7 @@ async function startLARS (
       console.log(chalk.blue('Stopping Docker Compose services...'))
       try {
         execSync(
-          `docker compose -p lars_${path.basename(process.cwd())} down`,
+          `docker compose -p lars_${path.basename(process.cwd()).toLowerCase()} down`,
           {
             cwd: LOCAL_DATA_PATH,
             stdio: 'inherit'
@@ -1527,7 +1527,7 @@ async function startLARS (
       chalk.blue(`\n🐳 Full projectName path for local data: ${projectName}`)
     )
     try {
-      execSync(`docker compose -p ${projectName} up -d`, {
+      execSync(`docker compose -p ${projectName.toLowerCase()} up -d`, {
         cwd: LOCAL_DATA_PATH,
         stdio: 'inherit'
       })
@@ -1543,7 +1543,7 @@ async function startLARS (
     console.log(chalk.blue('📜 Starting background logs for Docker Compose...'))
     backendLogsProcess = spawn(
       'docker',
-      ['compose', '-p', projectName, 'logs', '-f'],
+      ['compose', '-p', projectName.toLowerCase(), 'logs', '-f'],
       {
         cwd: LOCAL_DATA_PATH,
         stdio: 'inherit',
