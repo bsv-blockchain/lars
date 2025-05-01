@@ -819,6 +819,7 @@ async function editLARSDeploymentInfo (info: CARSConfigInfo) {
   let larsConfig = getLARSConfigFromDeploymentInfo(info)
   if (!larsConfig) {
     console.log(chalk.yellow('No LARS configuration found. Creating one.'))
+    // Prompt to create one
     await addLARSConfigInteractive(info)
     larsConfig = getLARSConfigFromDeploymentInfo(info)
   }
@@ -1139,7 +1140,9 @@ async function ensureFrontendDependencies (info: CARSConfigInfo) {
       chalk.blue(`📦 Installing frontend dependencies at ${frontendDir}...`)
     )
     try {
-      execSync('npm install', { cwd: frontendDir, stdio: 'inherit' })
+      const isWindows = process.platform === 'win32';
+      const npmCmd = isWindows ? 'npm.cmd' : 'npm';
+      execSync(`${npmCmd} install`, { cwd: frontendDir, stdio: 'inherit' });
       console.log(chalk.green('✅ Frontend dependencies installed.'))
     } catch (err) {
       console.error(chalk.red('❌ Failed to install frontend dependencies.'))
@@ -1496,9 +1499,12 @@ async function startLARS (
               '🔨 Changes detected in contracts directory. Running npm run compile...'
             )
           )
-          const compileProcess = spawn('npm', ['run', 'compile'], {
+          const isWindows = process.platform === 'win32';
+          const npmCmd = isWindows ? 'npm.cmd' : 'npm';
+          const compileProcess = spawn(npmCmd, ['run', 'compile'], {
             cwd: path.resolve(PROJECT_ROOT, 'backend'),
-            stdio: 'inherit'
+            stdio: 'inherit',
+            shell: isWindows
           })
 
           compileProcess.on('exit', code => {
@@ -1541,6 +1547,8 @@ async function startLARS (
 
     // Run logs in detached mode (background process)
     console.log(chalk.blue('📜 Starting background logs for Docker Compose...'))
+    const isWindows = process.platform === 'win32';
+    const npmCmd = isWindows ? 'npm.cmd' : 'npm';
     backendLogsProcess = spawn(
       'docker',
       ['compose', '-p', projectName.toLowerCase(), 'logs', '-f'],
@@ -1651,7 +1659,10 @@ async function startFrontend (
   if (language === 'react') {
     console.log(chalk.blue('🎨 Starting React frontend...'))
     // Start `npm run start` in frontendDir
-    childProc = spawn('npm', ['run', 'start'], {
+    const isWindows = process.platform === 'win32';
+    const npmCmd = isWindows ? 'npm.cmd' : 'npm';
+    childProc = spawn(npmCmd, ['run', 'start'], {
+      shell: isWindows,
       cwd: frontendDir,
       stdio: 'inherit'
     })
@@ -1670,7 +1681,9 @@ async function startFrontend (
     } catch {
       console.log(chalk.blue('📦 Installing "serve" globally...'))
       try {
-        execSync('npm install -g serve', { stdio: 'inherit' })
+        const isWindows = process.platform === 'win32';
+        const npmCmd = isWindows ? 'npm.cmd' : 'npm';
+        execSync(`${npmCmd} install -g serve`, { stdio: 'inherit' });
       } catch (err) {
         console.error(chalk.red('❌ Failed to install "serve" globally.'))
         return null
