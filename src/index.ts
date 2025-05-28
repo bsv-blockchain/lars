@@ -1940,7 +1940,7 @@ function generatePackageJson (backendDependencies: Record<string, string>) {
     license: 'ISC',
     dependencies: {
       ...backendDependencies,
-      '@bsv/overlay-express': '^0.5.0',
+      '@bsv/overlay-express': '^0.5.1',
       mysql2: '^3.11.5',
       tsx: '^4.19.2'
     },
