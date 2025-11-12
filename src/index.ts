@@ -52,8 +52,8 @@ interface CARSConfigInfo {
   schemaVersion: string
   topicManagers?: Record<string, string>
   lookupServices?: Record<
-  string,
-  { serviceFactory: string, hydrateWith?: string }
+    string,
+    { serviceFactory: string, hydrateWith?: string }
   >
   frontend?: { language: string, sourceDirectory: string }
   contracts?: { language: string, baseDirectory: string }
@@ -113,7 +113,7 @@ const GLOBAL_KEYS_PATH = path.join(os.homedir(), '.lars-keys.json')
 // Default LARS config
 /// //////////////////////////////////////////////////////////////////////////////////
 
-function getDefaultProjectConfig (): LARSConfigLocal {
+function getDefaultProjectConfig(): LARSConfigLocal {
   return {
     projectKeys: {
       mainnet: { serverPrivateKey: undefined, arcApiKey: undefined },
@@ -135,7 +135,7 @@ function getDefaultProjectConfig (): LARSConfigLocal {
 // Utility functions
 /// //////////////////////////////////////////////////////////////////////////////////
 
-function loadDeploymentInfo (): CARSConfigInfo {
+function loadDeploymentInfo(): CARSConfigInfo {
   if (!fs.existsSync(DEPLOYMENT_INFO_PATH)) {
     console.error(
       chalk.red('❌ deployment-info.json not found in the current directory.')
@@ -147,18 +147,18 @@ function loadDeploymentInfo (): CARSConfigInfo {
   return info
 }
 
-function getLARSConfigFromDeploymentInfo (
+function getLARSConfigFromDeploymentInfo(
   info: CARSConfigInfo
 ): CARSConfig | undefined {
   // Find the LARS config (provider === 'LARS')
   return info.configs?.find(c => c.provider === 'LARS')
 }
 
-function ensureLocalDataDir () {
+function ensureLocalDataDir() {
   fs.ensureDirSync(LOCAL_DATA_PATH)
 }
 
-function loadOrInitGlobalKeys (): GlobalKeys {
+function loadOrInitGlobalKeys(): GlobalKeys {
   let keys: GlobalKeys = {}
   if (fs.existsSync(GLOBAL_KEYS_PATH)) {
     keys = JSON.parse(fs.readFileSync(GLOBAL_KEYS_PATH, 'utf-8'))
@@ -168,11 +168,11 @@ function loadOrInitGlobalKeys (): GlobalKeys {
   return keys
 }
 
-function saveGlobalKeys (keys: GlobalKeys) {
+function saveGlobalKeys(keys: GlobalKeys) {
   fs.writeFileSync(GLOBAL_KEYS_PATH, JSON.stringify(keys, null, 2))
 }
 
-function loadProjectConfig (): LARSConfigLocal {
+function loadProjectConfig(): LARSConfigLocal {
   if (!fs.existsSync(LARS_CONFIG_PATH)) {
     return getDefaultProjectConfig()
   }
@@ -180,12 +180,12 @@ function loadProjectConfig (): LARSConfigLocal {
   return { ...getDefaultProjectConfig(), ...existingConfig }
 }
 
-function saveProjectConfig (config: LARSConfigLocal) {
+function saveProjectConfig(config: LARSConfigLocal) {
   ensureLocalDataDir()
   fs.writeFileSync(LARS_CONFIG_PATH, JSON.stringify(config, null, 2))
 }
 
-async function promptForPrivateKey (): Promise<string> {
+async function promptForPrivateKey(): Promise<string> {
   const { action } = await inquirer.prompt([
     {
       type: 'list',
@@ -224,7 +224,7 @@ async function promptForPrivateKey (): Promise<string> {
   }
 }
 
-async function promptForArcApiKey (): Promise<string | undefined> {
+async function promptForArcApiKey(): Promise<string | undefined> {
   const { setArcKey } = await inquirer.prompt([
     {
       type: 'confirm',
@@ -252,7 +252,7 @@ async function promptForArcApiKey (): Promise<string | undefined> {
   return arcApiKey
 }
 
-async function promptYesNo (
+async function promptYesNo(
   message: string,
   defaultVal = true
 ): Promise<boolean> {
@@ -267,7 +267,7 @@ async function promptYesNo (
   return answer
 }
 
-async function makeWallet (
+async function makeWallet(
   chain: 'test' | 'main',
   privateKey: string
 ): Promise<WalletInterface> {
@@ -288,7 +288,7 @@ async function makeWallet (
   return wallet
 }
 
-async function fundWallet (
+async function fundWallet(
   wallet: WalletInterface,
   amount: number,
   walletPrivateKey: string,
@@ -368,7 +368,7 @@ async function fundWallet (
   console.log(chalk.green('🎉 LARS Wallet funded!'))
 }
 
-function getCurrentNetwork (larsConfig: CARSConfig): 'mainnet' | 'testnet' {
+function getCurrentNetwork(larsConfig: CARSConfig): 'mainnet' | 'testnet' {
   return larsConfig.network === 'mainnet' ? 'mainnet' : 'testnet'
 }
 
@@ -376,7 +376,7 @@ function getCurrentNetwork (larsConfig: CARSConfig): 'mainnet' | 'testnet' {
 // Menus for editing config and keys
 /// //////////////////////////////////////////////////////////////////////////////////
 
-async function maybeHoistProjectKeyToGlobal (
+async function maybeHoistProjectKeyToGlobal(
   projectVal: string | undefined,
   globalVal: string | undefined,
   setter: (val: string) => void,
@@ -385,8 +385,7 @@ async function maybeHoistProjectKeyToGlobal (
 ) {
   if (projectVal && !globalVal) {
     const ask = await promptYesNo(
-      `Would you like to also save this ${
-        keyType === 'serverPrivateKey' ? 'server key' : 'TAAL API key'
+      `Would you like to also save this ${keyType === 'serverPrivateKey' ? 'server key' : 'TAAL API key'
       } to your global keys for ${network}?`
     )
     if (ask) {
@@ -403,7 +402,7 @@ async function maybeHoistProjectKeyToGlobal (
 }
 
 // Edit local project config interactively (keys and toggles)
-async function editLocalConfig (
+async function editLocalConfig(
   projectConfig: LARSConfigLocal,
   network: 'mainnet' | 'testnet'
 ) {
@@ -419,27 +418,23 @@ async function editLocalConfig (
     console.log(chalk.blue(`\nProject config menu (Network: ${network})`))
     const choices = [
       {
-        name: `Server private key: ${
-          effectiveServerKey ? '(set)' : '(not set)'
-        } (project-level: ${netKeys.serverPrivateKey ? 'yes' : 'no'})`,
+        name: `Server private key: ${effectiveServerKey ? '(set)' : '(not set)'
+          } (project-level: ${netKeys.serverPrivateKey ? 'yes' : 'no'})`,
         value: 'serverKey'
       },
       {
-        name: `TAAL (ARC) API key: ${
-          effectiveArcApiKey ? '(set)' : '(not set)'
-        } (project-level: ${netKeys.arcApiKey ? 'yes' : 'no'})`,
+        name: `TAAL (ARC) API key: ${effectiveArcApiKey ? '(set)' : '(not set)'
+          } (project-level: ${netKeys.arcApiKey ? 'yes' : 'no'})`,
         value: 'arcKey'
       },
       {
-        name: `Request logging: ${
-          projectConfig.enableRequestLogging ? 'enabled' : 'disabled'
-        }`,
+        name: `Request logging: ${projectConfig.enableRequestLogging ? 'enabled' : 'disabled'
+          }`,
         value: 'reqlog'
       },
       {
-        name: `GASP sync: ${
-          projectConfig.enableGASPSync ? 'enabled' : 'disabled'
-        }`,
+        name: `GASP sync: ${projectConfig.enableGASPSync ? 'enabled' : 'disabled'
+          }`,
         value: 'gasp'
       },
       {
@@ -565,7 +560,7 @@ async function editLocalConfig (
 }
 
 // A separate function to handle editing advanced overlay engine config
-async function editOverlayAdvancedConfig (projectConfig: LARSConfigLocal) {
+async function editOverlayAdvancedConfig(projectConfig: LARSConfigLocal) {
   projectConfig.overlayAdvancedConfig =
     projectConfig.overlayAdvancedConfig || {}
   let done = false
@@ -574,9 +569,8 @@ async function editOverlayAdvancedConfig (projectConfig: LARSConfigLocal) {
     const cfg = projectConfig.overlayAdvancedConfig
     const choices = [
       {
-        name: `Bearer Token (adminToken): ${
-          cfg.adminToken ? '(set)' : '(not set, will auto-generate)'
-        } `,
+        name: `Bearer Token (adminToken): ${cfg.adminToken ? '(set)' : '(not set, will auto-generate)'
+          } `,
         value: 'adminToken'
       },
       {
@@ -588,9 +582,8 @@ async function editOverlayAdvancedConfig (projectConfig: LARSConfigLocal) {
         value: 'logPrefix'
       },
       {
-        name: `throwOnBroadcastFailure: ${
-          cfg.throwOnBroadcastFailure ? 'true' : 'false'
-        }`,
+        name: `throwOnBroadcastFailure: ${cfg.throwOnBroadcastFailure ? 'true' : 'false'
+          }`,
         value: 'throwFail'
       },
       {
@@ -661,7 +654,7 @@ async function editOverlayAdvancedConfig (projectConfig: LARSConfigLocal) {
 }
 
 // Helper to interactively edit syncConfiguration
-async function editSyncConfiguration (cfg: OverlayAdvancedConfig) {
+async function editSyncConfiguration(cfg: OverlayAdvancedConfig) {
   cfg.syncConfiguration = cfg.syncConfiguration || {}
   let done = false
   while (!done) {
@@ -749,7 +742,7 @@ async function editSyncConfiguration (cfg: OverlayAdvancedConfig) {
 }
 
 // Edit global keys
-async function editGlobalKeys () {
+async function editGlobalKeys() {
   const keys = loadOrInitGlobalKeys()
 
   let done = false
@@ -762,27 +755,23 @@ async function editGlobalKeys () {
     )
     const choices = [
       {
-        name: `Mainnet server key: ${
-          keys.mainnet?.serverPrivateKey ? 'set' : 'not set'
-        }`,
+        name: `Mainnet server key: ${keys.mainnet?.serverPrivateKey ? 'set' : 'not set'
+          }`,
         value: 'm_serverKey'
       },
       {
-        name: `Mainnet TAAL (ARC) key: ${
-          keys.mainnet?.taalApiKey ? 'set' : 'not set'
-        }`,
+        name: `Mainnet TAAL (ARC) key: ${keys.mainnet?.taalApiKey ? 'set' : 'not set'
+          }`,
         value: 'm_arcKey'
       },
       {
-        name: `Testnet server key: ${
-          keys.testnet?.serverPrivateKey ? 'set' : 'not set'
-        }`,
+        name: `Testnet server key: ${keys.testnet?.serverPrivateKey ? 'set' : 'not set'
+          }`,
         value: 't_serverKey'
       },
       {
-        name: `Testnet TAAL (ARC) key: ${
-          keys.testnet?.taalApiKey ? 'set' : 'not set'
-        }`,
+        name: `Testnet TAAL (ARC) key: ${keys.testnet?.taalApiKey ? 'set' : 'not set'
+          }`,
         value: 't_arcKey'
       },
       { name: 'Back', value: 'back' }
@@ -815,7 +804,7 @@ async function editGlobalKeys () {
 }
 
 // Edit LARS Deployment Info (e.g., change network)
-async function editLARSDeploymentInfo (info: CARSConfigInfo) {
+async function editLARSDeploymentInfo(info: CARSConfigInfo) {
   let larsConfig = getLARSConfigFromDeploymentInfo(info)
   if (!larsConfig) {
     console.log(chalk.yellow('No LARS configuration found. Creating one.'))
@@ -834,9 +823,8 @@ async function editLARSDeploymentInfo (info: CARSConfigInfo) {
     const choices = [
       { name: `Change network (current: ${currentNet})`, value: 'network' },
       {
-        name: `Edit run configuration (current: ${
-          larsConfig.run?.join(', ') || 'none'
-        })`,
+        name: `Edit run configuration (current: ${larsConfig.run?.join(', ') || 'none'
+          })`,
         value: 'runConfig'
       },
       { name: 'Back', value: 'back' }
@@ -906,7 +894,7 @@ async function editLARSDeploymentInfo (info: CARSConfigInfo) {
 // Main menus
 /// //////////////////////////////////////////////////////////////////////////////////
 
-async function mainMenu () {
+async function mainMenu() {
   const info = loadDeploymentInfo()
   let larsConfig = getLARSConfigFromDeploymentInfo(info)
   const projectConfig = loadProjectConfig()
@@ -972,7 +960,7 @@ async function mainMenu () {
 }
 
 // Provide a menu to call admin-protected routes on the running OverlayExpress instance.
-async function runAdminTools (
+async function runAdminTools(
   projectConfig: LARSConfigLocal,
   larsConfig: CARSConfig
 ) {
@@ -1061,8 +1049,7 @@ async function runAdminTools (
         if (err.response) {
           console.log(
             chalk.red(
-              `Server responded with status ${
-                err.response.status
+              `Server responded with status ${err.response.status
               }: ${JSON.stringify(err.response.data)}`
             )
           )
@@ -1073,7 +1060,7 @@ async function runAdminTools (
 }
 
 // Add LARS config interactively if none exists
-async function addLARSConfigInteractive (info: CARSConfigInfo) {
+async function addLARSConfigInteractive(info: CARSConfigInfo) {
   console.log(chalk.blue('Let’s create a LARS configuration.'))
   const { network } = await inquirer.prompt([
     {
@@ -1117,7 +1104,7 @@ async function addLARSConfigInteractive (info: CARSConfigInfo) {
 }
 
 // Auto-install frontend dependencies if needed
-async function ensureFrontendDependencies (info: CARSConfigInfo) {
+async function ensureFrontendDependencies(info: CARSConfigInfo) {
   if (!info.frontend || !info.frontend.language) return // no frontend
   const frontendDir = path.resolve(
     PROJECT_ROOT,
@@ -1154,7 +1141,7 @@ async function ensureFrontendDependencies (info: CARSConfigInfo) {
 // Start or reset LARS
 /// //////////////////////////////////////////////////////////////////////////////////
 
-async function startLARS (
+async function startLARS(
   larsConfig: CARSConfig,
   projectConfig: LARSConfigLocal,
   withNgrok = false
@@ -1601,7 +1588,7 @@ async function startLARS (
 }
 
 // Wait for backend services to be ready
-async function waitForBackendServices () {
+async function waitForBackendServices() {
   // A simple check: we know backend runs on 8080 from Docker.
   // We'll just poll the endpoint until it responds or timeout after some time.
   const maxAttempts = 30
@@ -1627,7 +1614,7 @@ async function waitForBackendServices () {
   throw new Error('Backend failed to start')
 }
 
-async function startFrontend (
+async function startFrontend(
   info: CARSConfigInfo
 ): Promise<ChildProcess | null> {
   if (!info.frontend || !info.frontend.language) {
@@ -1714,7 +1701,7 @@ async function startFrontend (
  * Generates a Docker Compose config with MySQL, Mongo, Adminer, mongo-express, and overlay-dev-container.
  * Adminer for MySQL on 8081, mongo-express for Mongo on 8082.
  */
-function generateDockerCompose (
+function generateDockerCompose(
   hostingUrl: string,
   localDataPath: string,
   serverPrivateKey: string,
@@ -1833,7 +1820,7 @@ function generateDockerCompose (
   return composeContent
 }
 
-function generateIndexTs (
+function generateIndexTs(
   info: CARSConfigInfo,
   config: LARSConfigLocal,
   arcApiKey: string | undefined,
@@ -1926,7 +1913,7 @@ main()
   return imports + mainFunction + closing
 }
 
-function generatePackageJson (backendDependencies: Record<string, string>) {
+function generatePackageJson(backendDependencies: Record<string, string>) {
   const packageJsonContent = {
     name: 'overlay-express-dev',
     version: '1.0.0',
@@ -1951,7 +1938,7 @@ function generatePackageJson (backendDependencies: Record<string, string>) {
   return packageJsonContent
 }
 
-function generateDockerfile (enableContracts: boolean) {
+function generateDockerfile(enableContracts: boolean) {
   let file = `FROM node:22-alpine
 WORKDIR /app
 COPY ./local-data/overlay-dev-container/package.json .
@@ -1972,7 +1959,7 @@ CMD ["/wait-for-services.sh", "mysql", "3306", "mongo", "27017", "npm", "run", "
   return file
 }
 
-function generateTsConfig () {
+function generateTsConfig() {
   return `{
     "compilerOptions": {
         "experimentalDecorators": true,
@@ -1981,7 +1968,7 @@ function generateTsConfig () {
 }`
 }
 
-function generateWaitScript () {
+function generateWaitScript() {
   return `#!/bin/sh
 
 set -e
@@ -2010,7 +1997,7 @@ exec "$@"`
 /**
  * Deletes the local-data directory after confirmation, or immediately if --force
  */
-async function resetLARS (force?: boolean) {
+async function resetLARS(force?: boolean) {
   const proceed =
     force ||
     (await promptYesNo(
@@ -2026,7 +2013,7 @@ async function resetLARS (force?: boolean) {
     console.log(chalk.blue('Stopping Docker Compose (if running)...'))
     try {
       execSync('docker compose down', { cwd: LOCAL_DATA_PATH, stdio: 'ignore' })
-    } catch {}
+    } catch { }
     console.log(
       chalk.blue(`Removing local-data directory at: ${LOCAL_DATA_PATH}`)
     )
