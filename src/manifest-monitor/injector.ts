@@ -12,6 +12,75 @@ import fs from 'fs-extra'
 import path from 'path'
 import chalk from 'chalk'
 
+/**
+ * Default descriptions for common protocols
+ * Based on manifest-studio package permission templates
+ */
+const PROTOCOL_DESCRIPTIONS: Record<string, { description: string, counterpartyType?: 'self' | 'server' | 'any' }> = {
+  // Authentication & Security
+  'auth message signature': {
+    description: 'For mutual authentication with servers',
+    counterpartyType: 'server'
+  },
+  'server hmac': {
+    description: 'For nonce generation and HMAC creation',
+    counterpartyType: 'self'
+  },
+
+  // Messaging
+  'messagebox': {
+    description: 'For message delivery and communication',
+    counterpartyType: 'server'
+  },
+
+  // Payments
+  '3241645161d8': {
+    description: 'For payment transactions',
+    counterpartyType: 'any'
+  },
+
+  // Identity
+  'identity key retrieval': {
+    description: 'For identity resolution and verification',
+    counterpartyType: 'any'
+  },
+  'certificate list': {
+    description: 'For certificate registry access',
+    counterpartyType: 'any'
+  },
+
+  // Storage & Data
+  'contact': {
+    description: 'For contact management and encryption',
+    counterpartyType: 'self'
+  },
+  'wallet settings': {
+    description: 'For wallet configuration and preferences',
+    counterpartyType: 'self'
+  },
+
+  // Tokens
+  'PushDrop': {
+    description: 'For token transactions',
+    counterpartyType: 'any'
+  }
+}
+
+/**
+ * Generate a better description for a protocol permission
+ */
+function getProtocolDescription(protocolID: [number, string], counterparty: string, method: string): string {
+  const protocolName = protocolID[1]
+  const defaultInfo = PROTOCOL_DESCRIPTIONS[protocolName]
+
+  if (defaultInfo) {
+    return defaultInfo.description
+  }
+
+  // Fallback to method-based description
+  return `${method} using "${protocolName}"`
+}
+
 interface CollectedPermissions {
   protocolPermissions: Array<{
     protocolID: [number, string]
@@ -233,6 +302,23 @@ export function getInjectionScript(collectorPort: number = 3399): string {
   const seen = { protocol: new Set(), basket: new Set(), cert: new Set() };
   const of = window.fetch;
   
+  // Default descriptions for common protocols
+  const protocolDescriptions = {
+    'auth message signature': 'For mutual authentication with servers',
+    'server hmac': 'For nonce generation and HMAC creation',
+    'messagebox': 'For message delivery and communication',
+    '3241645161d8': 'For payment transactions',
+    'identity key retrieval': 'For identity resolution and verification',
+    'certificate list': 'For certificate registry access',
+    'contact': 'For contact management and encryption',
+    'wallet settings': 'For wallet configuration and preferences',
+    'PushDrop': 'For token transactions'
+  };
+  
+  function getDescription(protocolName, method) {
+    return protocolDescriptions[protocolName] || (method + ' using "' + protocolName + '"');
+  }
+  
   function send(type, permission) {
     fetch(COLLECTOR_URL, {
       method: 'POST',
@@ -258,7 +344,8 @@ export function getInjectionScript(collectorPort: number = 3399): string {
         const key = sec + ':' + name + ':' + cp;
         if (!seen.protocol.has(key)) {
           seen.protocol.add(key);
-          send('protocol', { protocolID: [sec, name], counterparty: cp, description: method + ' using "' + name + '"' });
+          const desc = getDescription(name, method);
+          send('protocol', { protocolID: [sec, name], counterparty: cp, description: desc });
           console.log('%c✓ Protocol: [' + sec + ', "' + name + '"] → ' + cp, 'color: green');
         }
       }
