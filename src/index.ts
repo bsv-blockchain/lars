@@ -30,6 +30,34 @@ import {
 } from '@bsv/wallet-toolbox-client'
 import open from 'open'
 
+// Global flag to track if LARS is running
+let larsIsRunning = false
+
+// Global reference to frontend process for cleanup
+let globalFrontendProcess: ChildProcess | null = null
+
+// Cleanup function to kill frontend process
+function cleanupFrontendProcess(): void {
+  if (globalFrontendProcess) {
+    try {
+      globalFrontendProcess.kill('SIGTERM')
+      globalFrontendProcess = null
+    } catch {
+      // Process may already be dead
+    }
+  }
+}
+
+// Handle Ctrl+C gracefully during inquirer prompts (but not when LARS is running)
+process.on('SIGINT', () => {
+  if (!larsIsRunning) {
+    cleanupFrontendProcess()
+    console.log(chalk.yellow('\n\n👋 Goodbye!'))
+    process.exit(0)
+  }
+  // If larsIsRunning, let the startLARS handlers deal with it
+})
+
 /// //////////////////////////////////////////////////////////////////////////////////
 // Constants and Types
 /// //////////////////////////////////////////////////////////////////////////////////
@@ -84,6 +112,7 @@ interface LARSConfigLocal {
   projectKeys: ProjectKeys
   enableRequestLogging: boolean
   enableGASPSync: boolean
+  enablePermissionMonitor: boolean
   // Overlay advanced config for customizing OverlayExpress
   overlayAdvancedConfig?: OverlayAdvancedConfig
 }
@@ -115,6 +144,7 @@ const GLOBAL_KEYS_PATH = path.join(os.homedir(), '.lars-keys.json')
 
 function getDefaultProjectConfig(): LARSConfigLocal {
   return {
+    enablePermissionMonitor: false,
     projectKeys: {
       mainnet: { serverPrivateKey: undefined, arcApiKey: undefined },
       testnet: { serverPrivateKey: undefined, arcApiKey: undefined }
@@ -438,6 +468,11 @@ async function editLocalConfig(
         value: 'gasp'
       },
       {
+        name: `Permission Monitor: ${projectConfig.enablePermissionMonitor ? 'enabled' : 'disabled'
+          } (auto-generate manifest.json permissions)`,
+        value: 'permissionMonitor'
+      },
+      {
         name: 'Advanced Overlay Engine Config',
         value: 'advancedEngine'
       },
@@ -550,6 +585,14 @@ async function editLocalConfig(
             chalk.green('✅ All topics in syncConfiguration set to false.')
           )
         }
+      }
+    } else if (action === 'permissionMonitor') {
+      projectConfig.enablePermissionMonitor = !projectConfig.enablePermissionMonitor
+      saveProjectConfig(projectConfig)
+      if (projectConfig.enablePermissionMonitor) {
+        console.log(chalk.green('✅ Permission Monitor enabled. When you start LARS, it will intercept wallet requests and auto-generate manifest.json permissions.'))
+      } else {
+        console.log(chalk.yellow('Permission Monitor disabled.'))
       }
     } else if (action === 'advancedEngine') {
       await editOverlayAdvancedConfig(projectConfig)
@@ -1145,7 +1188,9 @@ async function startLARS(
   larsConfig: CARSConfig,
   projectConfig: LARSConfigLocal,
   withNgrok = false
-) {
+): Promise<void> {
+  // Set flag to indicate LARS is running (for SIGINT handling)
+  larsIsRunning = true
   console.log(
     chalk.yellow(figlet.textSync('LARS', { horizontalLayout: 'full' }))
   )
@@ -1344,8 +1389,29 @@ async function startLARS(
   let frontendProcess: ChildProcess | null = null
 
   // Define a single cleanup routine that stops everything:
-  const stopAll = (exitCode?: number) => {
+  const stopAll = async (exitCode?: number) => {
     console.log(chalk.yellow('\nReceived interrupt signal. Stopping LARS...'))
+
+    // 0) Clean up permission monitor if it was enabled
+    if (projectConfig.enablePermissionMonitor) {
+      try {
+        const { stopCollectorServer } = await import('./manifest-monitor/injector.js')
+        stopCollectorServer()
+
+        // Restore original index.html
+        const frontendDir = path.resolve(PROJECT_ROOT, info.frontend?.sourceDirectory || 'frontend')
+        const indexHtmlBackup = path.join(frontendDir, 'index.html.lars-backup')
+        const indexHtmlPath = path.join(frontendDir, 'index.html')
+        if (fs.existsSync(indexHtmlBackup)) {
+          fs.copyFileSync(indexHtmlBackup, indexHtmlPath)
+          fs.unlinkSync(indexHtmlBackup)
+          console.log(chalk.green('✅ Restored original index.html'))
+        }
+      } catch (err) {
+        console.error(chalk.red('Error cleaning up permission monitor:'), err)
+      }
+    }
+
     // 1) Kill the frontend dev process if running
     if (frontendProcess) {
       console.log(chalk.blue('Stopping frontend dev process...'))
@@ -1393,8 +1459,18 @@ async function startLARS(
   }
 
   // Attach the same cleanup routine to SIGINT / SIGTERM
-  process.on('SIGINT', () => stopAll(0))
-  process.on('SIGTERM', () => stopAll(0))
+  process.on('SIGINT', () => {
+    stopAll(0).catch(err => {
+      console.error(chalk.red('Error during cleanup:'), err)
+      process.exit(1)
+    })
+  })
+  process.on('SIGTERM', () => {
+    stopAll(0).catch(err => {
+      console.error(chalk.red('Error during cleanup:'), err)
+      process.exit(1)
+    })
+  })
   // -------------------------------------------------------
 
   if (runBackend) {
@@ -1569,13 +1645,15 @@ async function startLARS(
       )
       await waitForBackendServices()
       // Store the returned ChildProcess reference
-      frontendProcess = await startFrontend(info)
+      frontendProcess = await startFrontend(info, projectConfig.enablePermissionMonitor)
+      globalFrontendProcess = frontendProcess
     } else {
       console.log(chalk.green('\n🎉 LARS environment (backend only) is ready!'))
     }
   } else if (runFrontend) {
     // If only the frontend is selected:
-    frontendProcess = await startFrontend(info)
+    frontendProcess = await startFrontend(info, projectConfig.enablePermissionMonitor)
+    globalFrontendProcess = frontendProcess
     console.log(chalk.green('\n🎉 LARS environment (frontend only) is ready!'))
   } else {
     console.log(
@@ -1615,7 +1693,8 @@ async function waitForBackendServices() {
 }
 
 async function startFrontend(
-  info: CARSConfigInfo
+  info: CARSConfigInfo,
+  enablePermissionMonitor: boolean = false
 ): Promise<ChildProcess | null> {
   if (!info.frontend || !info.frontend.language) {
     console.log(
@@ -1635,6 +1714,40 @@ async function startFrontend(
       chalk.red(`❌ Frontend directory not found at ${frontendDir}, skipping.`)
     )
     return null
+  }
+
+  // Start permission monitor if enabled
+  if (enablePermissionMonitor) {
+    const { startCollectorServer, getInjectionScript } = await import('./manifest-monitor/injector.js')
+    const manifestPath = path.join(frontendDir, 'public', 'manifest.json')
+    const appName = info.configs?.find(c => c.name)?.name || path.basename(PROJECT_ROOT)
+
+    // Start the collector server
+    await startCollectorServer({
+      outputPath: manifestPath,
+      name: appName
+    })
+
+    // Inject the script into index.html
+    const indexHtmlPath = path.join(frontendDir, 'index.html')
+    if (fs.existsSync(indexHtmlPath)) {
+      const originalHtml = fs.readFileSync(indexHtmlPath, 'utf-8')
+      const injectionScript = getInjectionScript(3399)
+      const marker = '<!-- LARS_MANIFEST_MONITOR -->'
+
+      // Only inject if not already present
+      if (!originalHtml.includes(marker)) {
+        const injectedHtml = originalHtml.replace(
+          '</head>',
+          `${marker}${injectionScript}${marker}</head>`
+        )
+        fs.writeFileSync(indexHtmlPath, injectedHtml)
+        console.log(chalk.green('✅ Permission monitor script injected into index.html'))
+
+        // Store original for cleanup
+        fs.writeFileSync(indexHtmlPath + '.lars-backup', originalHtml)
+      }
+    }
   }
 
   // Ensure dependencies
@@ -1927,7 +2040,7 @@ function generatePackageJson(backendDependencies: Record<string, string>) {
     license: 'ISC',
     dependencies: {
       ...backendDependencies,
-      '@bsv/overlay-express': '^0.8.4',
+      '@bsv/overlay-express': '^0.9.1',
       mysql2: '^3.11.5',
       tsx: '^4.19.2'
     },
@@ -2112,9 +2225,55 @@ program
     await resetLARS(opts.force)
   })
 
+program
+  .command('manifest-monitor')
+  .description('Monitor wallet requests and auto-generate manifest.json permissions')
+  .option('-p, --port <port>', 'Proxy server port', '3322')
+  .option('-w, --wallet-port <port>', 'Wallet port to forward to', '3321')
+  .option('-o, --output <path>', 'Output manifest.json path')
+  .option('-n, --name <name>', 'Application name for manifest')
+  .option('-b, --browser', 'Show browser console snippet instead of running proxy')
+  .action(async opts => {
+    const { startManifestMonitor, printUsageInstructions, printBrowserSnippet } = await import('./manifest-monitor/index.js')
+
+    // Browser snippet mode - just print the snippet and exit
+    if (opts.browser) {
+      printBrowserSnippet()
+      return
+    }
+
+    const info = loadDeploymentInfo()
+    const frontendDir = info.frontend?.sourceDirectory || 'frontend'
+    const defaultOutput = path.join(PROJECT_ROOT, frontendDir, 'public', 'manifest.json')
+
+    const proxyPort = parseInt(opts.port)
+    const walletPort = parseInt(opts.walletPort)
+    const outputPath = opts.output || defaultOutput
+    const appName = opts.name || info.configs?.find(c => c.name)?.name || path.basename(PROJECT_ROOT)
+
+    await startManifestMonitor({
+      proxyPort,
+      walletPort,
+      outputPath,
+      appName
+    })
+
+    printUsageInstructions(proxyPort)
+  })
+
 // Default action => main menu
 program.action(async () => {
-  await mainMenu()
+  try {
+    await mainMenu()
+  } catch (err: unknown) {
+    // Handle inquirer's ExitPromptError gracefully (user pressed Ctrl+C)
+    if (err && typeof err === 'object' && 'name' in err && err.name === 'ExitPromptError') {
+      cleanupFrontendProcess()
+      console.log(chalk.yellow('\n\n👋 Goodbye!'))
+      process.exit(0)
+    }
+    throw err
+  }
 })
 
 program.parse(process.argv)
