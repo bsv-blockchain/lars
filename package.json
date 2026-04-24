@@ -20,8 +20,8 @@
     "author": "BSV Association",
     "license": "SEE LICENSE IN LICENSE.txt",
     "dependencies": {
-        "@bsv/sdk": "^1.8.4",
-        "@bsv/wallet-toolbox-client": "^1.6.31",
+        "@bsv/sdk": "^2.0.1",
+        "@bsv/wallet-toolbox-client": "^2.0.5",
         "axios": "^1.7.9",
         "chalk": "^5.3.0",
         "chokidar": "^3.5.3",
@@ -32,7 +32,7 @@
         "inquirer": "^12.1.0",
         "ngrok": "^5.0.0-beta.2",
         "open": "^10.1.0",
-        "tsx": "^3.12.7",
+        "tsx": "^4.20.0",
         "yaml": "^2.2.1"
     },
     "devDependencies": {

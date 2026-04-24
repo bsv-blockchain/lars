@@ -188,6 +188,73 @@ A standard BSV project might look like:
 6. **Watches code** and automatically recompiles contracts and restarts services on changes.
 7. **Provides a smooth path to CARS**, so you can use a similar workflow in the cloud.
 
+## Permission Monitor
+
+LARS includes a **permission monitor** that automatically generates the `manifest.json` permissions your app needs by intercepting wallet API calls during development.
+
+### Why Use Permission Monitor?
+
+Metanet apps require a `manifest.json` file that declares the permissions they need (protocol permissions, basket access, certificate access, etc.). Creating this file manually is tedious and error-prone. The permission monitor automates this by intercepting all wallet API calls and extracting the permission requirements automatically.
+
+### Usage (Integrated with LARS Start)
+
+1. **Enable the permission monitor:**
+   ```bash
+   npx lars
+   ```
+   Select "Edit Local Project Config" → Toggle "Permission Monitor: enabled"
+
+2. **Start LARS normally:**
+   Select "Start Local Environment" or run `npx lars start`
+
+3. **Use your app** - click through all features that interact with the wallet. You'll see permissions being collected in the console:
+   ```
+   🔍 Permission Monitor Active
+      Collector server on http://localhost:3399
+      Writing to: /path/to/frontend/public/manifest.json
+   
+   → getPublicKey
+   ✓ Protocol: [2, "3241645161d8"] → self
+   → listOutputs
+   ✓ Basket: "contacts"
+   ```
+
+4. **Stop LARS** (Ctrl+C) - the manifest.json is automatically saved and the original index.html is restored.
+
+### How It Works
+
+When permission monitor is enabled, LARS:
+1. Injects a small script into your frontend's `index.html` that intercepts `fetch` calls to `localhost:3321`
+2. Runs a collector server that receives permission data from the browser
+3. Auto-saves permissions to `manifest.json` as they're detected
+4. Restores the original `index.html` when LARS stops
+
+### Example Output
+
+The permission monitor generates permissions like this:
+
+```json
+{
+  "babbage": {
+    "groupPermissions": {
+      "protocolPermissions": [
+        {
+          "protocolID": [2, "3241645161d8"],
+          "counterparty": "self",
+          "description": "getPublicKey using \"3241645161d8\""
+        }
+      ],
+      "basketAccess": [
+        {
+          "basket": "contacts",
+          "description": "Access to \"contacts\""
+        }
+      ]
+    }
+  }
+}
+```
+
 ## Tips & Troubleshooting
 
 - **Port Conflicts**: LARS uses ports `8080` (app), `3306` (MySQL), and `27017` (MongoDB). Ensure these aren’t in use.
